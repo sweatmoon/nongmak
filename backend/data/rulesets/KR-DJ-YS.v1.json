@@ -1,0 +1,19 @@
+{
+  "region_code": "KR-DJ-YS",
+  "region_name": "대전광역시 유성구",
+  "version": "v1",
+  "boundary_min_m": 1.0,
+  "well_min_m": 20.0,
+  "waterbody_min_m": 10.0,
+  "hut_max_area_m2": 33.0,
+  "septic_capacity_rules": [
+    { "max_occupants": 2, "capacity_m3": 1.0 },
+    { "max_occupants": 5, "capacity_m3": 2.0 },
+    { "max_occupants": 8, "capacity_m3": 3.0 },
+    { "max_occupants": 999, "capacity_m3": 4.0 }
+  ],
+  "risk_keywords_water": ["저수지", "수변", "하천", "하천변", "연못"],
+  "pipe_diameter_mm": 100,
+  "pipe_slope_min_pct": 1.0,
+  "notes": "대전 유성구 기준 MVP 템플릿 v1"
+}

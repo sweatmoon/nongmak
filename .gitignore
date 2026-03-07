@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+.env
+.venv
+venv/
+env/
+
+# Database
+*.db
+*.sqlite
+
+# Output files
+backend/out/
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# PM2
+.pm2/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
