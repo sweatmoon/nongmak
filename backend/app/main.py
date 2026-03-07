@@ -521,6 +521,60 @@ async def proxy_vworld_tile(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@app.get("/vworld-key")
+async def get_vworld_key():
+    """VWorld API 키를 프론트엔드에 안전하게 전달 (브라우저 직접 WFS 호출용)"""
+    from app.config import VWORLD_API_KEY
+    if not VWORLD_API_KEY:
+        raise HTTPException(status_code=503, detail="VWORLD_API_KEY 미설정")
+    return {"key": VWORLD_API_KEY}
+
+
+@app.get("/proxy/vworld-wfs")
+async def proxy_vworld_wfs(lon: float, lat: float):
+    """
+    VWorld WFS 필지 조회 프록시
+    - 브라우저 직접 호출이 막힌 환경(샌드박스 등)에서 백엔드가 대신 호출
+    - 성공 시 GeoJSON feature 반환, 실패 시 404
+    """
+    from app.config import VWORLD_API_KEY
+    api_key = VWORLD_API_KEY or ""
+    if not api_key:
+        raise HTTPException(status_code=503, detail="VWORLD_API_KEY 미설정")
+
+    params = {
+        "service": "WFS",
+        "version": "2.0.0",
+        "request": "GetFeature",
+        "typeName": "lp_pa_cbnd_bubun",
+        "key": api_key,
+        "output": "application/json",
+        "srsName": "EPSG:4326",
+        "CQL_FILTER": f"INTERSECTS(geom,POINT({lon} {lat}))",
+        "count": "1",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                "https://api.vworld.kr/req/wfs",
+                params=params,
+                headers={"Referer": "https://www.vworld.kr", "User-Agent": "Mozilla/5.0"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"VWorld WFS 오류: {resp.status_code}")
+            data = resp.json()
+            features = data.get("features", [])
+            if not features:
+                raise HTTPException(status_code=404, detail="해당 좌표의 필지 없음")
+            return features[0]  # 첫 번째 feature 반환
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="VWorld WFS 타임아웃")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @app.get("/proxy/vworld-status")
 async def proxy_vworld_status():
     """VWorld API 키 활성화 상태 확인"""
