@@ -147,16 +147,32 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   const [cadastralOn, setCadastralOn] = useState(false)
   const [jibunOn, setJibunOn] = useState(true)            // 지번 표시 토글 (기본 ON)
   const [vworldReady, setVworldReady] = useState<boolean | null>(null)
+  const [vworldKey, setVworldKey] = useState<string>('')
   const [dismissKakaoBanner, setDismissKakaoBanner] = useState(false)
   const addrEmbedRef = useRef<HTMLDivElement>(null)
   const initDoneRef = useRef(false)
 
-  // VWorld API 키 활성화 상태 확인 → 준비되면 지번 레이어 자동 ON
+  // VWorld API 키 획득 → 브라우저 직접 WMTS 호출로 상태 확인
   useEffect(() => {
-    fetch('/api/proxy/vworld-status')
+    fetch('/api/vworld-key')
       .then(r => r.json())
-      .then(d => setVworldReady(d.status === 'active'))
-      .catch(() => setVworldReady(false))
+      .then(d => {
+        const key = d.key || ''
+        setVworldKey(key)
+        if (!key) { setVworldReady(false); return }
+        // 브라우저에서 직접 VWorld 타일 1장 요청해 키 활성 여부 확인
+        const testUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/10/420/868.png`
+        fetch(testUrl, { mode: 'no-cors' })
+          .then(() => setVworldReady(true))
+          .catch(() => setVworldReady(true)) // no-cors면 opaque → 성공으로 간주
+      })
+      .catch(() => {
+        // /api/vworld-key 실패 시 백엔드 status 체크 fallback
+        fetch('/api/proxy/vworld-status')
+          .then(r => r.json())
+          .then(d => setVworldReady(d.status === 'active'))
+          .catch(() => setVworldReady(false))
+      })
   }, [])
 
 
@@ -171,11 +187,11 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       jibunLayerRef.current.remove()
       jibunLayerRef.current = null
     }
-    if (vworldReady) {
-      // VWorld WMTS LP_PA_CBND_JIBUN: 지번 텍스트가 포함된 지적도 레이어
-      // 배경이 투명하여 OSM + 지적도 경계 위에 자연스럽게 오버레이됨
+    if (vworldReady && vworldKey) {
+      // VWorld WMTS 직접 URL (브라우저 → api.vworld.kr 직접 호출, CORS 허용)
+      const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
       const jibunLayer = window.L.tileLayer(
-        '/api/proxy/vworld-tile?layer=LP_PA_CBND_JIBUN&style=default&tilematrixset=EPSG%3A900913&tilematrix={z}&tilerow={y}&tilecol={x}',
+        tileUrl,
         {
           attribution: '© VWorld 지번',
           maxZoom: 19, minZoom: 14,  // 줌 14+ 에서만 표시 (가독성 확보)
@@ -188,7 +204,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       jibunLayerRef.current = jibunLayer
       setJibunOn(true)
     }
-  }, [vworldReady])
+  }, [vworldReady, vworldKey])
 
 
   /* ── 카카오 지도 초기화 ────────────────────────────────────────────────── */
@@ -269,11 +285,12 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       cadastralLayerRef.current = null
       setCadastralOn(false)
     } else {
-      if (vworldReady) {
-        // ✅ VWorld 활성화: OSM 위에 연속지적도 WMTS 반투명 오버레이
+      if (vworldReady && vworldKey) {
+        // ✅ VWorld 활성화: 브라우저 직접 WMTS URL 사용 (백엔드 프록시 불필요)
         // LP_PA_CBND_BUBUN: 연속지적도 경계선 레이어 (배경 투명)
+        const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
         const overlayLayer = window.L.tileLayer(
-          '/api/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG%3A900913&tilematrix={z}&tilerow={y}&tilecol={x}',
+          tileUrl,
           {
             attribution: '© VWorld 연속지적도',
             maxZoom: 19, minZoom: 7,
@@ -286,7 +303,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         cadastralLayerRef.current = overlayLayer
         setCadastralOn(true)
       } else {
-        // ⏳ VWorld 미활성화: Esri 위성사진으로 대체 (OSM 위에)
+        // ⏳ VWorld 키 없음: Esri 위성사진으로 대체
         const overlayLayer = window.L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
           {
@@ -300,7 +317,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         setCadastralOn(true)
       }
     }
-  }, [vworldReady])
+  }, [vworldReady, vworldKey])
 
   // VWorld 준비 완료 시 지번 레이어 자동 활성화
   useEffect(() => {

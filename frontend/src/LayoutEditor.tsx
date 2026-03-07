@@ -61,10 +61,19 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
   const [jibunOn, setJibunOn] = useState(true)
   const [satelliteOn, setSatelliteOn] = useState(false)
   const [cadastralOn, setCadastralOn] = useState(false)
+  const [vworldKey, setVworldKey] = useState<string>('')
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const cadastralLayerRef = useRef<any>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const baseLayerRef = useRef<any>(null)
+
+  // VWorld API 키 로드
+  useEffect(() => {
+    fetch('/api/vworld-key')
+      .then(r => r.json())
+      .then(d => setVworldKey(d.key || ''))
+      .catch(() => {})
+  }, [])
 
   /* ── Leaflet 로드 + 지도 초기화 ────────────────────────────────────────── */
   useEffect(() => {
@@ -317,10 +326,14 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
       cadastralLayerRef.current = null
       setCadastralOn(false)
     } else {
+      // 브라우저 직접 VWorld WMTS URL 사용 (키 있으면 지적도, 없으면 Esri 위성)
+      const tileUrl = vworldKey
+        ? `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+        : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
       const layer = getL().tileLayer(
-        '/api/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG%3A900913&tilematrix={z}&tilerow={y}&tilecol={x}',
+        tileUrl,
         {
-          attribution: '© VWorld 연속지적도',
+          attribution: vworldKey ? '© VWorld 연속지적도' : '© Esri 위성사진',
           maxZoom: 19, minZoom: 7,
           tileSize: 256, opacity: 1.0, zIndex: 400,
         }
@@ -329,7 +342,7 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
       cadastralLayerRef.current = layer
       setCadastralOn(true)
     }
-  }, [])
+  }, [vworldKey])
 
   /* ── 위성사진 토글 ───────────────────────────────────────────────────── */
   const toggleSatellite = useCallback(() => {
