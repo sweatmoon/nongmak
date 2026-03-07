@@ -1,14 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>농막 도면 생성 — 제출용 초안 패키지 자동 생성</title>
-    <meta name="description" content="농막 및 정화조 설치를 위한 제출용 초안 패키지 자동 생성 시스템" />
+    <title>농막 도면 생성</title>
+    <meta name="description" content="농막 및 정화조 설치를 위한 제출용 도면과 서류를 자동 생성합니다. 지도 기반 토지 선택을 통해 실제 토지 경계 기반 배치도를 생성합니다." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-    <!-- 카카오 우편번호 서비스 (주소 검색) -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+    <!-- 카카오 Maps SDK (주소검색 + 지도) -->
+    <script type="text/javascript" src="//dapi.kakao.com/v2/maps/sdk.js?appkey=YOUR_KAKAO_APP_KEY&libraries=services"></script>
+    <!-- 카카오 주소검색 Postcode -->
     <script src="//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js"></script>
   </head>
   <body>

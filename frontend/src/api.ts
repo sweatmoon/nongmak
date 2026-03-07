@@ -1,8 +1,18 @@
 import axios from 'axios'
 
 // 모든 API 호출은 Vite 프록시 /api → localhost:8000 을 통해 처리
-// VITE_API_BASE 환경변수가 있어도 프록시로 통일 (CORS 우회)
 const PROXY_BASE = '/api'
+
+export interface ParcelInfo {
+  jibun?: string
+  area_m2?: number
+  jimok?: string
+  yongdo?: string
+  polygon_wgs84?: number[][]
+  polygon_local?: number[][]
+  centroid?: { lon: number; lat: number }
+  is_mock?: boolean
+}
 
 export interface OrderRequest {
   product_type: 'BUNDLE' | 'SEPTIC_ONLY'
@@ -20,6 +30,7 @@ export interface OrderRequest {
   toilet_type: 'FLUSH' | 'PORTABLE' | 'HOLDING_TANK'
   treatment_mode: 'SEPTIC_DISCHARGE' | 'INFILTRATION' | 'UNKNOWN'
   notes?: string
+  parcel?: ParcelInfo | null
 }
 
 export interface OrderResponse {
@@ -28,6 +39,22 @@ export interface OrderResponse {
   septic_capacity_m3: number
   risk_flags: string[]
   download_url: string
+  parcel?: ParcelInfo | null
+  revision_count: number
+  max_revision: number
+}
+
+export interface ReviseRequest {
+  hut_area_m2?: number
+  hut_w_m?: number
+  hut_d_m?: number
+  placement_hint?: string
+  occupants_regular?: number
+  occupants_max?: number
+  toilet_type?: string
+  treatment_mode?: string
+  notes?: string
+  parcel?: ParcelInfo | null
 }
 
 const api = axios.create({
@@ -40,7 +67,22 @@ export async function createOrder(req: OrderRequest): Promise<OrderResponse> {
   return res.data
 }
 
-// 다운로드 URL: Vite 프록시를 통해 /api/orders/{id}/download → localhost:8000/orders/{id}/download
+export async function reviseOrder(orderId: string, req: ReviseRequest): Promise<OrderResponse> {
+  const res = await api.post<OrderResponse>(`/orders/${orderId}/revise`, req)
+  return res.data
+}
+
+export async function fetchParcelByCoord(lon: number, lat: number): Promise<ParcelInfo> {
+  const res = await api.get<ParcelInfo>('/parcel/by-coord', { params: { lon, lat } })
+  return res.data
+}
+
+export async function fetchParcelByAddress(address: string): Promise<ParcelInfo> {
+  const res = await api.get<ParcelInfo>('/parcel/by-address', { params: { address } })
+  return res.data
+}
+
+// 다운로드 URL: Vite 프록시를 통해 /api/orders/{id}/download
 export function getDownloadUrl(orderId: string): string {
   return `${PROXY_BASE}/orders/${orderId}/download`
 }

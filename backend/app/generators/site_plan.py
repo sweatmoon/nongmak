@@ -2,6 +2,7 @@
 배치도 PDF 생성 모듈
 """
 import io
+import math
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
@@ -10,7 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.graphics.shapes import Drawing, Rect, String, Line, Circle
+from reportlab.graphics.shapes import Drawing, Rect, String, Line, Circle, Polygon as RLPolygon, PolyLine
 from reportlab.graphics import renderPDF
 import os, sys
 
@@ -52,7 +53,7 @@ DISCLAIMER = "※ 본 도면은 제출용 초안이며, 최종 제출 전 관할
 
 
 def generate_site_plan_pdf(order_id: str, req, computed: dict) -> bytes:
-    """배치도 PDF 생성"""
+    """배치도 PDF 생성 - polygon 기반 or 기존 사각형 기반 fallback"""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=A4,
@@ -63,6 +64,8 @@ def generate_site_plan_pdf(order_id: str, req, computed: dict) -> bytes:
     ruleset = computed.get("ruleset", {})
     capacity = computed["septic_capacity_m3"]
     risk_flags = computed.get("risk_flags", [])
+    parcel = computed.get("parcel")   # parcel dict (polygon_local 포함)
+    layout = computed.get("layout")  # pre-computed layout dict
     elements = []
 
     # 제목
@@ -70,6 +73,7 @@ def generate_site_plan_pdf(order_id: str, req, computed: dict) -> bytes:
     elements.append(Spacer(1, 4*mm))
     elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor("#2563EB")))
     elements.append(Spacer(1, 4*mm))
+
 
     # 기본 정보 테이블
     info_data = [
@@ -94,8 +98,32 @@ def generate_site_plan_pdf(order_id: str, req, computed: dict) -> bytes:
     elements.append(tbl)
     elements.append(Spacer(1, 6*mm))
 
-    # 배치 다이어그램 (reportlab Drawing)
-    diagram = _build_site_diagram(req, computed, ruleset)
+    # 배치 다이어그램 (polygon 기반 or 기존 방식)
+    if parcel and parcel.get("polygon_local") and layout:
+        diagram = _build_polygon_site_diagram(req, computed, ruleset, parcel, layout)
+        # 필지 정보 표시
+        elements.append(Paragraph("■ 토지(필지) 정보", _style(10, bold=True)))
+        elements.append(Spacer(1, 2*mm))
+        parcel_data = [
+            ["지번", parcel.get("jibun", "-"), "면적", f"{parcel.get('area_m2', '-')} ㎡"],
+            ["지목", parcel.get("jimok", "-"), "용도지역", parcel.get("yongdo", "-")],
+        ]
+        ptbl = Table(parcel_data, colWidths=[25*mm, 60*mm, 25*mm, 60*mm])
+        ptbl.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0FDF4")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#F0FDF4")),
+            ("FONTNAME", (0, 0), (0, -1), FONT_BOLD),
+            ("FONTNAME", (2, 0), (2, -1), FONT_BOLD),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(ptbl)
+        elements.append(Spacer(1, 4*mm))
+    else:
+        diagram = _build_site_diagram(req, computed, ruleset)
     elements.append(diagram)
     elements.append(Spacer(1, 4*mm))
 
@@ -150,7 +178,142 @@ def generate_site_plan_pdf(order_id: str, req, computed: dict) -> bytes:
     return buf.getvalue()
 
 
-def _build_site_diagram(req, computed, ruleset) -> Drawing:
+def _build_polygon_site_diagram(req, computed, ruleset, parcel: dict, layout: dict) -> Drawing:
+    """
+    실제 지적 polygon 기반 배치도 다이어그램
+    polygon_local 좌표를 도면 좌표로 변환하여 그림
+    """
+    W, H = 170*mm, 120*mm
+    d = Drawing(W, H)
+    MARGIN = 10*mm
+
+    polygon_local = parcel.get("polygon_local", [])
+    if not polygon_local:
+        return _build_site_diagram(req, computed, ruleset)
+
+    # ── 좌표 정규화 (polygon_local → 도면 좌표) ──────────────────────────
+    xs = [c[0] for c in polygon_local]
+    ys = [c[1] for c in polygon_local]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max_x - min_x or 1
+    span_y = max_y - min_y or 1
+
+    draw_w = W - 2 * MARGIN
+    draw_h = H - 2 * MARGIN
+    scale = min(draw_w / span_x, draw_h / span_y) * 0.85
+
+    def to_draw(px, py):
+        """로컬 좌표 → 도면 좌표"""
+        cx_offset = MARGIN + draw_w / 2 - (min_x + max_x) / 2 * scale
+        cy_offset = MARGIN + draw_h / 2 - (min_y + max_y) / 2 * scale
+        return px * scale + cx_offset, py * scale + cy_offset
+
+    # ── 배경 ──────────────────────────────────────────────────────────────
+    d.add(Rect(0, 0, W, H, fillColor=colors.HexColor("#F8FAFC"), strokeColor=None, strokeWidth=0))
+
+    # ── 토지 경계 polygon (SITE_BOUNDARY 레이어) ──────────────────────────
+    pts_flat = []
+    for c in polygon_local:
+        dx, dy = to_draw(c[0], c[1])
+        pts_flat.extend([dx, dy])
+    if len(pts_flat) >= 6:
+        d.add(RLPolygon(pts_flat,
+                        fillColor=colors.HexColor("#DCFCE7"),
+                        strokeColor=colors.HexColor("#166534"),
+                        strokeWidth=2.0))
+
+    # ── 레이어: HUT ──────────────────────────────────────────────────────
+    hut = layout.get("hut", {})
+    if hut:
+        hx1, hy1 = to_draw(hut["x"], hut["y"])
+        hw = hut["w"] * scale
+        hd = hut["d"] * scale
+        d.add(Rect(hx1, hy1, hw, hd,
+                   fillColor=colors.HexColor("#DBEAFE"),
+                   strokeColor=colors.HexColor("#1D4ED8"),
+                   strokeWidth=1.5))
+        # 텍스트
+        tcx, tcy = to_draw(hut["cx"], hut["cy"])
+        d.add(String(tcx - 8*mm, tcy + 1*mm, "농  막",
+                     fontSize=8, fontName=FONT_BOLD, fillColor=colors.HexColor("#1D4ED8")))
+        d.add(String(tcx - 10*mm, tcy - 2.5*mm, f"{req.hut_w_m}m×{req.hut_d_m}m",
+                     fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#1D4ED8")))
+
+    # ── 레이어: SEPTIC ────────────────────────────────────────────────────
+    septic = layout.get("septic", {})
+    if septic:
+        sx1, sy1 = to_draw(septic["x"], septic["y"])
+        sw = septic["w"] * scale
+        sd = septic["d"] * scale
+        d.add(Rect(sx1, sy1, sw, sd,
+                   fillColor=colors.HexColor("#FEF9C3"),
+                   strokeColor=colors.HexColor("#CA8A04"),
+                   strokeWidth=1.5))
+        scx, scy = to_draw(septic["cx"], septic["cy"])
+        d.add(String(scx - 7*mm, scy + 0.5*mm, "정화조",
+                     fontSize=7.5, fontName=FONT_BOLD, fillColor=colors.HexColor("#854D0E")))
+        d.add(String(scx - 8*mm, scy - 3*mm, f"{computed['septic_capacity_m3']}m³",
+                     fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#854D0E")))
+
+    # ── 배관 연결선 (HUT → SEPTIC) ────────────────────────────────────────
+    if hut and septic:
+        hcx, hcy = to_draw(hut["cx"], hut["cy"])
+        scx, scy = to_draw(septic["cx"], septic["cy"])
+        d.add(Line(hcx, hcy, scx, scy,
+                   strokeColor=colors.HexColor("#CA8A04"),
+                   strokeWidth=1.2,
+                   strokeDashArray=[4, 3]))
+        # 방류 화살표 (정화조에서 바깥쪽)
+        arrow_dx = scx - hcx
+        arrow_dy = scy - hcy
+        arrow_len = math.hypot(arrow_dx, arrow_dy) or 1
+        ex = scx + arrow_dx / arrow_len * 15 * mm
+        ey = scy + arrow_dy / arrow_len * 15 * mm
+        # clamp
+        ex = max(3*mm, min(W - 3*mm, ex))
+        ey = max(3*mm, min(H - 3*mm, ey))
+        d.add(Line(scx, scy, ex, ey,
+                   strokeColor=colors.HexColor("#0891B2"),
+                   strokeWidth=1.5,
+                   strokeDashArray=[5, 3]))
+        d.add(String(ex - 6*mm, ey + 1*mm, "→방류",
+                     fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#0891B2")))
+
+    # ── 방위 표시 ──────────────────────────────────────────────────────────
+    d.add(String(W - 12*mm, H - 9*mm, "N↑", fontSize=9, fontName=FONT_BOLD, fillColor=colors.HexColor("#374151")))
+
+    # ── 축척 및 레이어 범례 ───────────────────────────────────────────────
+    lx = 4*mm
+    ly = H - 10*mm
+    items = [
+        (colors.HexColor("#DCFCE7"), colors.HexColor("#166534"), "토지 경계"),
+        (colors.HexColor("#DBEAFE"), colors.HexColor("#1D4ED8"), "농  막"),
+        (colors.HexColor("#FEF9C3"), colors.HexColor("#CA8A04"), "정화조"),
+    ]
+    for i, (fc, sc, lbl) in enumerate(items):
+        ry = ly - i * 6*mm
+        d.add(Rect(lx, ry - 1.5*mm, 6*mm, 4*mm, fillColor=fc, strokeColor=sc, strokeWidth=0.8))
+        d.add(String(lx + 7.5*mm, ry - 0.5*mm, lbl, fontSize=6.5, fontName=FONT_NAME, fillColor=colors.black))
+
+    # ── 면적 정보 ─────────────────────────────────────────────────────────
+    area = parcel.get("area_m2", "")
+    jibun = parcel.get("jibun", "")
+    if jibun:
+        d.add(String(4*mm, 7*mm, f"지번: {jibun}", fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#374151")))
+    if area:
+        d.add(String(4*mm, 3*mm, f"면적: {area} ㎡", fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#374151")))
+
+    # ── mock 표시 ─────────────────────────────────────────────────────────
+    if parcel.get("is_mock"):
+        d.add(String(W / 2 - 20*mm, H - 5*mm,
+                     "※ 샘플 필지 (지적도 API 미연동)",
+                     fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#DC2626")))
+
+    return d
+
+
+
     """배치도 SVG-like 다이어그램 생성"""
     W, H = 170*mm, 110*mm
     d = Drawing(W, H)

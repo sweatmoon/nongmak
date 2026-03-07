@@ -21,3 +21,7 @@ CORS_ORIGINS = [
 
 # 또는 모든 origin 허용 (개발 환경)
 CORS_ALLOW_ALL = True
+
+# VWorld API 키 (환경변수 또는 .env 파일에서 읽기)
+VWORLD_API_KEY = os.environ.get("VWORLD_API_KEY", "")
+
