@@ -74,11 +74,7 @@ interface LeafletLayer { addTo(m: LeafletMap): LeafletLayer; remove(): void }
 interface LeafletStatic {
   map(el: HTMLElement, opts: object): LeafletMap
   tileLayer(url: string, opts: object): LeafletLayer
-  tileLayer: {
-    (url: string, opts: object): LeafletLayer
-    wms(url: string, opts: object): LeafletLayer
-  }
-  marker(ll: [number, number]): LeafletLayer
+  marker(ll: [number, number], opts?: object): LeafletLayer
   polygon(lls: [number, number][], opts: object): LeafletLayer
   divIcon(opts: object): object
   DomUtil: { create(tag: string, cls: string): HTMLElement }
@@ -137,8 +133,10 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   // Leaflet 참조
   const leafletMapRef = useRef<LeafletMap | null>(null)
   const leafletLayersRef = useRef<LeafletLayer[]>([])
-  const leafletBaseRef = useRef<LeafletLayer | null>(null)     // 베이스 타일 레이어
-  const cadastralLayerRef = useRef<LeafletLayer | null>(null)  // 위성/지적도 오버레이
+  const leafletBaseRef = useRef<LeafletLayer | null>(null)
+  const cadastralLayerRef = useRef<LeafletLayer | null>(null)
+  const jibunLayerRef = useRef<LeafletLayer | null>(null)  // 지번 오버레이
+  const jibunFallbackRef = useRef<LeafletLayer | null>(null) // 지번 폴백 마커
 
   const [mapEngine, setMapEngine] = useState<MapEngine>('loading')
   const [searchQuery, setSearchQuery] = useState(initialAddress || '')
@@ -146,18 +144,51 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showAddrSearch, setShowAddrSearch] = useState(false)
-  const [cadastralOn, setCadastralOn] = useState(false)  // 레이어 토글 상태
-  const [vworldReady, setVworldReady] = useState<boolean | null>(null) // null=확인중
+  const [cadastralOn, setCadastralOn] = useState(false)
+  const [jibunOn, setJibunOn] = useState(true)            // 지번 표시 토글 (기본 ON)
+  const [vworldReady, setVworldReady] = useState<boolean | null>(null)
   const addrEmbedRef = useRef<HTMLDivElement>(null)
   const initDoneRef = useRef(false)
 
-  // VWorld API 키 활성화 상태 확인
+  // VWorld API 키 활성화 상태 확인 → 준비되면 지번 레이어 자동 ON
   useEffect(() => {
     fetch('/api/proxy/vworld-status')
       .then(r => r.json())
       .then(d => setVworldReady(d.status === 'active'))
       .catch(() => setVworldReady(false))
   }, [])
+
+
+  // 필지 선택 시 지번 마커는 drawParcelPolygon 내에서 처리
+  // (이 useEffect는 더 이상 필요하지 않음)
+
+  /* ── 지번 오버레이 ON (내부 헬퍼) ─────────────────────────────────────── */
+  const enableJibunLayer = useCallback(() => {
+    if (!leafletMapRef.current || !window.L) return
+    // 이미 있으면 제거 후 재생성 (중복 방지)
+    if (jibunLayerRef.current) {
+      jibunLayerRef.current.remove()
+      jibunLayerRef.current = null
+    }
+    if (vworldReady) {
+      // VWorld WMTS LP_PA_CBND_JIBUN: 지번 텍스트가 포함된 지적도 레이어
+      // 배경이 투명하여 OSM + 지적도 경계 위에 자연스럽게 오버레이됨
+      const jibunLayer = window.L.tileLayer(
+        '/api/proxy/vworld-tile?layer=LP_PA_CBND_JIBUN&style=default&tilematrixset=EPSG%3A900913&tilematrix={z}&tilerow={y}&tilecol={x}',
+        {
+          attribution: '© VWorld 지번',
+          maxZoom: 19, minZoom: 14,  // 줌 14+ 에서만 표시 (가독성 확보)
+          tileSize: 256,
+          opacity: 1.0,
+          zIndex: 450,  // 지적도 레이어보다 위
+        } as object
+      )
+      jibunLayer.addTo(leafletMapRef.current)
+      jibunLayerRef.current = jibunLayer
+      setJibunOn(true)
+    }
+  }, [vworldReady])
+
 
   /* ── 카카오 지도 초기화 ────────────────────────────────────────────────── */
   const initKakaoMap = useCallback(() => {
@@ -176,8 +207,9 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       setMapEngine('kakao')
       console.log('[Kakao] 지도 초기화 성공!')
 
-      window.kakao.maps.event.addListener(map, 'click', async (e: { latLng: KakaoLatLng }) => {
-        await loadParcel(e.latLng.getLng(), e.latLng.getLat())
+      window.kakao.maps.event.addListener(map, 'click', async (e: unknown) => {
+        const ev = e as { latLng: KakaoLatLng }
+        await loadParcel(ev.latLng.getLng(), ev.latLng.getLat())
       })
 
       if (initialAddress) searchAddressKakao(initialAddress)
@@ -212,57 +244,110 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       map.on('click', async (e: { latlng: LeafletLatLng }) => {
         await loadParcel(e.latlng.lng, e.latlng.lat)
       })
+
+      // 지도 초기화 후 VWorld가 이미 준비된 상태라면 즉시 지번 레이어 ON
+      // (vworldReady는 비동기로 세팅되므로, 이미 세팅된 경우 처리)
+      setTimeout(() => {
+        if (vworldReady === true && jibunLayerRef.current === null) {
+          enableJibunLayer()
+        }
+      }, 300)
     } catch (err) {
       console.error('[Leaflet] initMap 오류:', err)
       setMapEngine('failed')
     }
-  }, [])
+  }, [vworldReady, enableJibunLayer])
 
-  /* ── 지도 레이어 토글 (일반지도 ↔ 지적도 or 위성사진) ─────────────────── */
+  /* ── 지적도 토글 (OSM 배경 유지 + VWorld 오버레이 ON/OFF) ──────────────── */
   const toggleCadastral = useCallback(() => {
     if (!leafletMapRef.current || !window.L) return
 
     if (cadastralLayerRef.current) {
-      // 끄기 → OSM 복귀
+      // 끄기 → VWorld 지적도 레이어 제거 (OSM 배경은 항상 유지)
       cadastralLayerRef.current.remove()
       cadastralLayerRef.current = null
-      if (leafletBaseRef.current) leafletBaseRef.current.addTo(leafletMapRef.current)
       setCadastralOn(false)
     } else {
-      // OSM 숨기기
-      leafletBaseRef.current?.remove()
-
-      let overlayLayer: LeafletLayer
-
       if (vworldReady) {
-        // ✅ VWorld 활성화: 연속지적도 WMTS 타일
-        overlayLayer = window.L.tileLayer(
+        // ✅ VWorld 활성화: OSM 위에 연속지적도 WMTS 반투명 오버레이
+        // LP_PA_CBND_BUBUN: 연속지적도 경계선 레이어 (배경 투명)
+        const overlayLayer = window.L.tileLayer(
           '/api/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG%3A900913&tilematrix={z}&tilerow={y}&tilecol={x}',
           {
             attribution: '© VWorld 연속지적도',
             maxZoom: 19, minZoom: 7,
             tileSize: 256,
-            opacity: 0.85,
+            opacity: 1.0,   // 완전 불투명 (배경은 OSM이 담당)
+            zIndex: 400,    // OSM 위에 표시
           } as object
         )
+        overlayLayer.addTo(leafletMapRef.current)
+        cadastralLayerRef.current = overlayLayer
+        setCadastralOn(true)
       } else {
-        // ⏳ VWorld 미활성화: Esri 위성사진으로 대체
-        overlayLayer = window.L.tileLayer(
+        // ⏳ VWorld 미활성화: Esri 위성사진으로 대체 (OSM 위에)
+        const overlayLayer = window.L.tileLayer(
           'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
           {
             attribution: '© Esri 위성사진',
             maxZoom: 19,
+            zIndex: 400,
           } as object
         )
+        overlayLayer.addTo(leafletMapRef.current)
+        cadastralLayerRef.current = overlayLayer
+        setCadastralOn(true)
       }
-
-      overlayLayer.addTo(leafletMapRef.current)
-      cadastralLayerRef.current = overlayLayer
-      setCadastralOn(true)
     }
   }, [vworldReady])
 
-  /* ── 지도 엔진 선택 로직 ───────────────────────────────────────────────── */
+  // VWorld 준비 완료 시 지번 레이어 자동 활성화
+  useEffect(() => {
+    if (vworldReady === true && leafletMapRef.current && window.L) {
+      // 지번 레이어가 아직 없고 jibunOn 상태면 자동 생성
+      if (!jibunLayerRef.current && jibunOn) {
+        enableJibunLayer()
+      }
+    }
+  }, [vworldReady, jibunOn, enableJibunLayer])
+
+  /* ── 지번 오버레이 토글 ─────────────────────────────────────────────────── */
+  const toggleJibun = useCallback(() => {
+    if (!leafletMapRef.current || !window.L) return
+
+    if (jibunLayerRef.current) {
+      // 끄기
+      jibunLayerRef.current.remove()
+      jibunLayerRef.current = null
+      if (jibunFallbackRef.current) {
+        jibunFallbackRef.current.remove()
+        jibunFallbackRef.current = null
+      }
+      setJibunOn(false)
+    } else {
+      if (vworldReady) {
+        enableJibunLayer()
+      } else {
+        // VWorld 미활성화 시 → 선택된 필지 centroid에 지번 라벨 표시
+        if (parcel?.jibun && parcel?.centroid) {
+          const { lat, lon } = parcel.centroid
+          const icon = (window.L as unknown as {
+            divIcon: (o: object) => object
+          }).divIcon({
+            html: `<div style="background:rgba(255,255,255,0.92);border:1.5px solid #166534;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;color:#166534;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15);">${parcel.jibun}</div>`,
+            className: '',
+            iconAnchor: [0, 0],
+          })
+          const marker = window.L.marker([lat, lon], { icon } as object)
+          marker.addTo(leafletMapRef.current)
+          jibunFallbackRef.current = marker
+          setJibunOn(true)
+        }
+      }
+    }
+  }, [vworldReady, parcel, enableJibunLayer])
+
+  /* ── 지도 엔진 선택 useEffect ──────────────────────────────────────────── */
   useEffect(() => {
     if (initDoneRef.current) return
     initDoneRef.current = true
@@ -353,7 +438,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         const polygon = new window.kakao.maps.Polygon({
           path,
           strokeWeight: 2.5, strokeColor: '#166534', strokeOpacity: 0.9,
-          fillColor: '#DCFCE7', fillOpacity: 0.4,
+          fillColor: '#DCFCE7', fillOpacity: 0.0,
         })
         polygon.setMap(kakaoMapRef.current)
         kakaoPolygonRef.current = polygon
@@ -386,13 +471,27 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         const lls = coords!.map(([lng, lat]) => [lat, lng] as [number, number])
         const poly = L.polygon(lls, {
           color: '#166534', weight: 2.5, opacity: 0.9,
-          fillColor: '#DCFCE7', fillOpacity: 0.4,
+          fillColor: '#DCFCE7', fillOpacity: 0.0,
         }).addTo(leafletMapRef.current)
         leafletLayersRef.current.push(poly)
       }
 
+      // 지번 표시 마커 (항상 표시)
+      if (p.jibun && p.centroid) {
+        const centerLat2 = p.centroid.lat
+        const centerLon2 = p.centroid.lon
+        const icon = (window.L as unknown as { divIcon: (o: object) => object }).divIcon({
+          html: `<div style="background:rgba(255,255,255,0.95);border:1.5px solid #166534;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;color:#166534;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15);">${p.jibun}</div>`,
+          className: '',
+          iconAnchor: [0, 0],
+        })
+        const jibunMarker = (window.L as unknown as { marker: (ll: [number,number], opts?: object) => LeafletLayer }).marker([centerLat2, centerLon2], { icon } as object)
+        jibunMarker.addTo(leafletMapRef.current)
+        leafletLayersRef.current.push(jibunMarker)
+      }
+
       // 마커
-      const marker = L.marker([centerLat, centerLon]).addTo(leafletMapRef.current)
+      const marker = L.marker([centerLat, centerLon], {} as object).addTo(leafletMapRef.current)
       leafletLayersRef.current.push(marker)
       leafletMapRef.current.panTo([centerLat, centerLon])
     }
@@ -516,9 +615,10 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
             )}
           </div>
 
-          {/* 지적도 토글 버튼 (Leaflet 모드에서만 표시) */}
+          {/* 지적도/지번 토글 버튼 (Leaflet 모드에서만 표시) */}
           {mapEngine === 'leaflet' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0', flexWrap: 'wrap' }}>
+              {/* 지적도 경계선 토글 */}
               <button
                 onClick={toggleCadastral}
                 style={{
@@ -540,8 +640,8 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
                   {cadastralOn ? (vworldReady ? '🗂️' : '🛰️') : '🗺️'}
                 </span>
                 {cadastralOn
-                  ? (vworldReady ? '연속지적도' : '위성사진')
-                  : (vworldReady ? '지적도 보기' : '위성사진 보기')
+                  ? (vworldReady ? '지적도 경계' : '위성사진')
+                  : (vworldReady ? '지적도 경계' : '위성사진')
                 }
                 <span style={{
                   display: 'inline-block', width: 32, height: 16, borderRadius: 8,
@@ -558,9 +658,49 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
                   }} />
                 </span>
               </button>
-              {cadastralOn && (
-                <span style={{ fontSize: '11px', color: vworldReady ? '#166534' : '#1D4ED8' }}>
-                  {vworldReady ? '🗂️ VWorld 연속지적도 표시 중' : '🛰️ Esri 위성사진 (지적도 키 활성화 대기 중)'}
+
+              {/* 지번 토글 버튼 */}
+              <button
+                onClick={toggleJibun}
+                title={vworldReady ? '지번 표시 (VWorld WMTS · 줌 14+ 자동표시)' : 'VWorld 키 미활성화 시 선택 필지만 표시'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '5px 12px', borderRadius: 6, fontSize: '12px',
+                  fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
+                  border: jibunOn
+                    ? (vworldReady ? '1.5px solid #92400E' : '1.5px solid #94A3B8')
+                    : '1.5px solid #94A3B8',
+                  background: jibunOn
+                    ? (vworldReady ? '#FEF3C7' : '#F1F5F9')
+                    : '#F8FAFC',
+                  color: jibunOn
+                    ? (vworldReady ? '#92400E' : '#64748B')
+                    : '#64748B',
+                }}
+              >
+                <span style={{ fontSize: 13 }}>🔢</span>
+                지번{vworldReady ? '' : ' (비활성)'}
+                <span style={{
+                  display: 'inline-block', width: 32, height: 16, borderRadius: 8,
+                  background: jibunOn && vworldReady ? '#D97706' : '#CBD5E1',
+                  position: 'relative', transition: 'background 0.2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', top: 2,
+                    left: jibunOn ? 18 : 2,
+                    width: 12, height: 12, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.2s',
+                  }} />
+                </span>
+              </button>
+
+              {/* 레이어 상태 안내 */}
+              {(cadastralOn || jibunOn) && (
+                <span style={{ fontSize: '11px', color: '#64748B' }}>
+                  {cadastralOn && vworldReady && '🗂️ 연속지적도 '}
+                  {cadastralOn && !vworldReady && '🛰️ 위성사진 '}
+                  {jibunOn && vworldReady && '· 🔢 지번 (줌14+)'}
+                  {jibunOn && !vworldReady && '· 🔢 선택 필지만'}
                 </span>
               )}
             </div>

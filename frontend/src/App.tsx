@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
   createOrder, reviseOrder, getDownloadUrl,
-  checkHealth, OrderRequest, OrderResponse, ReviseRequest, ParcelInfo
+  checkHealth, OrderRequest, OrderResponse, ReviseRequest, ParcelInfo, ManualLayout
 } from './api'
 import MapSelector from './MapSelector'
+import LayoutEditor, { LayoutResult } from './LayoutEditor'
 
 /* ────────────── 타입 ────────────── */
 type Page = 'landing' | 'form' | 'admin'
@@ -25,6 +26,7 @@ const INITIAL_FORM: OrderRequest = {
   treatment_mode: 'SEPTIC_DISCHARGE',
   notes: '',
   parcel: null,
+  manual_layout: null,
 }
 
 const RISK_FLAG_LABELS: Record<string, string> = {
@@ -37,18 +39,6 @@ const RISK_FLAG_DESC: Record<string, string> = {
 }
 
 /* ── 카카오 주소검색 타입 ──────────────────────────────── */
-declare global {
-  interface Window {
-    daum: {
-      Postcode: new (config: {
-        oncomplete: (data: DaumAddress) => void
-        onclose?: () => void
-        width?: string
-        height?: string
-      }) => { open: () => void; embed: (el: HTMLElement) => void }
-    }
-  }
-}
 interface DaumAddress {
   address: string; addressType: string; bname: string; buildingName: string
   jibunAddress: string; roadAddress: string; zonecode: string; sido: string; sigungu: string
@@ -260,8 +250,9 @@ function AddressSearch({ value, onChange }: { value: string; onChange: (addr: st
       if (!embedRef.current || !window.daum) return
       try {
         const pc = new window.daum.Postcode({
-          oncomplete: (data: DaumAddress) => {
-            onChange(data.jibunAddress || data.address)
+          oncomplete: (data) => {
+            const addr = (data as { jibunAddress?: string; address?: string }).jibunAddress || (data as { address?: string }).address || ''
+            onChange(addr)
             setShowModal(false)
           },
           onclose: () => setShowModal(false),
@@ -373,7 +364,9 @@ interface FormPageProps {
 
 function FormPage({ form, setForm, loading, setLoading, error, setError, result, setResult, onBack, onAdmin }: FormPageProps) {
   const [showMapSelector, setShowMapSelector] = useState(false)
+  const [showLayoutEditor, setShowLayoutEditor] = useState(false)
   const [revising, setRevising] = useState(false)
+  const [layoutResult, setLayoutResult] = useState<LayoutResult | null>(null)
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) {
     const { name, value, type } = e.target
@@ -402,10 +395,31 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+
+    // 토지가 선택된 경우 배치 편집기 먼저 열기
+    if (form.parcel && !layoutResult && !result) {
+      setShowLayoutEditor(true)
+      return
+    }
+
     setError(null); setResult(null); setLoading(true)
     try {
-      const res = await createOrder(form)
+      // layoutResult가 있으면 manual_layout도 포함
+      const submitForm = layoutResult
+        ? {
+            ...form,
+            manual_layout: {
+              hut_center_wgs84: layoutResult.hut_center_wgs84,
+              septic_center_wgs84: layoutResult.septic_center_wgs84,
+              hut_rotation_deg: layoutResult.hut_rotation_deg,
+              placement_note: layoutResult.placement_note,
+            },
+            notes: [form.notes, layoutResult.placement_note ? `[배치정보] ${layoutResult.placement_note}` : ''].filter(Boolean).join('\n'),
+          }
+        : form
+      const res = await createOrder(submitForm)
       setResult(res)
+      setLayoutResult(null)
       setTimeout(() => {
         document.getElementById('result-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 100)
@@ -419,6 +433,43 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
     } finally {
       setLoading(false)
     }
+  }
+
+  // LayoutEditor 확정 핸들러
+  function handleLayoutConfirm(lr: LayoutResult) {
+    setLayoutResult(lr)
+    setShowLayoutEditor(false)
+    // manual_layout을 form에 세팅 후 패키지 생성
+    const manualLayout: ManualLayout = {
+      hut_center_wgs84: lr.hut_center_wgs84,
+      septic_center_wgs84: lr.septic_center_wgs84,
+      hut_rotation_deg: lr.hut_rotation_deg,
+      placement_note: lr.placement_note,
+    }
+    setError(null); setResult(null); setLoading(true)
+    const submitForm = {
+      ...form,
+      manual_layout: manualLayout,
+      notes: [form.notes, lr.placement_note ? `[배치정보] ${lr.placement_note}` : ''].filter(Boolean).join('\n'),
+    }
+    createOrder(submitForm)
+      .then(res => {
+        setResult(res)
+        // form에도 manual_layout 저장 (수정 재생성 시 유지)
+        setForm(prev => ({ ...prev, manual_layout: manualLayout }))
+        setTimeout(() => {
+          document.getElementById('result-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 100)
+      })
+      .catch(err => {
+        if (err && typeof err === 'object' && 'response' in err) {
+          const axErr = err as { response?: { data?: { detail?: string } } }
+          setError(axErr.response?.data?.detail || '서버 오류가 발생했습니다.')
+        } else {
+          setError('서버에 연결할 수 없습니다.')
+        }
+      })
+      .finally(() => setLoading(false))
   }
 
   // ── 수정 후 재생성 ──────────────────────────────────────────────────────
@@ -465,6 +516,17 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
           onSelect={handleParcelSelect}
           onClose={() => setShowMapSelector(false)}
           initialAddress={form.address}
+        />
+      )}
+
+      {/* 배치 편집기 팝업 */}
+      {showLayoutEditor && form.parcel && (
+        <LayoutEditor
+          parcel={form.parcel}
+          hutW={form.hut_w_m}
+          hutD={form.hut_d_m}
+          onConfirm={handleLayoutConfirm}
+          onCancel={() => setShowLayoutEditor(false)}
         />
       )}
 
@@ -522,6 +584,36 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
               onClear={handleParcelClear}
               onReselect={() => setShowMapSelector(true)}
             />
+          )}
+
+          {/* 배치 확정 상태 표시 */}
+          {layoutResult && !result && (
+            <div style={{
+              background: '#DCFCE7', border: '1.5px solid #16A34A',
+              borderRadius: 10, padding: '12px 16px', margin: '8px 0',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              gap: 12,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 20 }}>✅</span>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#15803D' }}>배치 위치 확정됨</div>
+                  <div style={{ fontSize: 11, color: '#166534', marginTop: 2 }}>
+                    농막 회전 {layoutResult.hut_rotation_deg}° · 이격거리 포함
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowLayoutEditor(true)}
+                style={{
+                  padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                  border: '1.5px solid #16A34A', background: '#fff', color: '#15803D',
+                  cursor: 'pointer',
+                }}
+              >
+                🔧 배치 수정
+              </button>
+            </div>
           )}
 
           <form onSubmit={submitHandler}>
@@ -659,7 +751,9 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
               {loading ? <><span className="spinner" /> 패키지 생성 중...</>
                 : revising ? <><span className="spinner" /> 재생성 중...</>
                 : isReviseMode ? `🔄 수정 후 재생성 (${result!.revision_count + 1}/${result!.max_revision}회)`
-                : '🗂️ 패키지 생성'}
+                : (form.parcel && !layoutResult && !result)
+                  ? '🗺️ 배치 미리보기 → 패키지 생성'
+                  : '🗂️ 패키지 생성'}
             </button>
 
             {isReviseMode && (
@@ -771,7 +865,7 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
 
                 <div style={{ marginTop: '16px', textAlign: 'center' }}>
                   <button type="button"
-                    onClick={() => { setResult(null); setError(null); setForm(INITIAL_FORM); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
+                    onClick={() => { setResult(null); setError(null); setForm(INITIAL_FORM); setLayoutResult(null); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
                     style={{ background: 'none', border: '1px solid #D1D5DB', borderRadius: '8px', padding: '8px 20px', cursor: 'pointer', fontSize: '13px', color: '#64748B' }}>
                     🆕 새 패키지 생성
                   </button>

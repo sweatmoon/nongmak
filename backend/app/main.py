@@ -17,6 +17,77 @@ from app.rules import compute_order
 from app.generators.package import build_zip_package
 from app.parcel import fetch_parcel_by_coord, fetch_parcel_by_address
 from app.layout import compute_layout
+import math
+
+
+def wgs84_to_local(lat: float, lng: float, origin_lat: float, origin_lng: float) -> tuple[float, float]:
+    """WGS84 좌표를 origin 기준 미터 단위 로컬 좌표로 변환"""
+    dx = (lng - origin_lng) * 111320 * math.cos(math.radians(origin_lat))
+    dy = (lat - origin_lat) * 111320
+    return dx, dy
+
+
+def manual_layout_to_local(manual_layout, parcel_data: dict) -> dict | None:
+    """
+    LayoutEditor에서 사용자가 배치한 WGS84 좌표를 polygon_local 기준 layout_data로 변환
+    배치도 생성(build_zip_package)에 사용할 수 있는 형식으로 반환
+    """
+    if not manual_layout or not parcel_data:
+        return None
+
+    polygon_local = parcel_data.get("polygon_local")
+    polygon_wgs84 = parcel_data.get("polygon_wgs84")
+    centroid = parcel_data.get("centroid")
+
+    # origin 결정: polygon_local의 origin은 centroid 또는 첫 좌표 기준
+    # polygon_wgs84의 중심(centroid)을 WGS84 origin으로 사용
+    if centroid and centroid.get("lat") is not None:
+        origin_lat = centroid["lat"]
+        origin_lng = centroid["lon"]
+    elif polygon_wgs84 and len(polygon_wgs84) > 0:
+        lats = [p[1] for p in polygon_wgs84]
+        lngs = [p[0] for p in polygon_wgs84]
+        origin_lat = sum(lats) / len(lats)
+        origin_lng = sum(lngs) / len(lngs)
+    else:
+        return None
+
+    # polygon_local의 centroid를 local origin으로
+    if polygon_local and len(polygon_local) > 0:
+        local_cx = sum(p[0] for p in polygon_local) / len(polygon_local)
+        local_cy = sum(p[1] for p in polygon_local) / len(polygon_local)
+    else:
+        local_cx, local_cy = 0.0, 0.0
+
+    # manual_layout의 WGS84 → 로컬 미터 변환 (origin 기준 델타 + polygon_local centroid)
+    hut_lat, hut_lng = manual_layout.hut_center_wgs84
+    sep_lat, sep_lng = manual_layout.septic_center_wgs84
+
+    hut_dx, hut_dy = wgs84_to_local(hut_lat, hut_lng, origin_lat, origin_lng)
+    sep_dx, sep_dy = wgs84_to_local(sep_lat, sep_lng, origin_lat, origin_lng)
+
+    hut_cx = local_cx + hut_dx
+    hut_cy = local_cy + hut_dy
+    sep_cx = local_cx + sep_dx
+    sep_cy = local_cy + sep_dy
+
+    # hut_w, hut_d는 실제 모델에서 가져와야 하므로 caller가 채워줌
+    # 여기서는 좌표만 반환하고, w/d는 별도 처리
+    return {
+        "hut": {
+            "cx": hut_cx, "cy": hut_cy,
+            "w": None, "d": None,  # caller에서 채움
+            "x": None, "y": None,
+            "rotation_deg": manual_layout.hut_rotation_deg,
+        },
+        "septic": {
+            "cx": sep_cx, "cy": sep_cy,
+            "w": 2.0, "d": 1.5,
+            "x": sep_cx - 1.0, "y": sep_cy - 0.75,
+        },
+        "manual": True,
+        "placement_note": manual_layout.placement_note or "",
+    }
 
 app = FastAPI(
     title="농막 도면 생성 API",
@@ -91,7 +162,27 @@ async def create_order(req: OrderRequest):
 
     # 레이아웃 계산 (polygon 기반)
     layout_data = None
-    if parcel_data and parcel_data.get("polygon_local"):
+    if req.manual_layout and parcel_data:
+        # ✅ 사용자가 LayoutEditor에서 직접 배치한 좌표 우선 사용
+        try:
+            ml = manual_layout_to_local(req.manual_layout, parcel_data)
+            if ml:
+                ml["hut"]["w"] = req.hut_w_m
+                ml["hut"]["d"] = req.hut_d_m
+                ml["hut"]["x"] = ml["hut"]["cx"] - req.hut_w_m / 2
+                ml["hut"]["y"] = ml["hut"]["cy"] - req.hut_d_m / 2
+                if parcel_data.get("polygon_local"):
+                    from app.layout import polygon_bbox, polygon_centroid_local
+                    minx, miny, maxx, maxy = polygon_bbox(parcel_data["polygon_local"])
+                    cx, cy = polygon_centroid_local(parcel_data["polygon_local"])
+                    ml["bbox"] = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
+                    ml["centroid"] = {"x": cx, "y": cy}
+                layout_data = ml
+        except Exception:
+            layout_data = None
+
+    if layout_data is None and parcel_data and parcel_data.get("polygon_local"):
+        # manual_layout 없거나 실패 시 자동 계산
         try:
             layout_data = compute_layout(
                 parcel_data["polygon_local"],
@@ -220,7 +311,25 @@ async def revise_order(order_id: str, rev: ReviseRequest):
 
     # 레이아웃 재계산
     layout_data = None
-    if parcel_data and parcel_data.get("polygon_local"):
+    if new_req.manual_layout and parcel_data:
+        try:
+            ml = manual_layout_to_local(new_req.manual_layout, parcel_data)
+            if ml:
+                ml["hut"]["w"] = new_req.hut_w_m
+                ml["hut"]["d"] = new_req.hut_d_m
+                ml["hut"]["x"] = ml["hut"]["cx"] - new_req.hut_w_m / 2
+                ml["hut"]["y"] = ml["hut"]["cy"] - new_req.hut_d_m / 2
+                if parcel_data.get("polygon_local"):
+                    from app.layout import polygon_bbox, polygon_centroid_local
+                    minx, miny, maxx, maxy = polygon_bbox(parcel_data["polygon_local"])
+                    cx, cy = polygon_centroid_local(parcel_data["polygon_local"])
+                    ml["bbox"] = {"minx": minx, "miny": miny, "maxx": maxx, "maxy": maxy}
+                    ml["centroid"] = {"x": cx, "y": cy}
+                layout_data = ml
+        except Exception:
+            layout_data = None
+
+    if layout_data is None and parcel_data and parcel_data.get("polygon_local"):
         try:
             layout_data = compute_layout(
                 parcel_data["polygon_local"],
@@ -333,6 +442,30 @@ def get_order_detail(order_id: str):
 # ── VWorld 타일/WMS 프록시 ──────────────────────────────────────────────────
 import httpx
 
+# 1x1 투명 PNG (VWorld 응답 실패 시 폴백용)
+_TRANSPARENT_PNG = (
+    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00'
+    b'\x08\x06\x00\x00\x00\x1fz\x92\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00'
+    b'\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+)
+
+# 공유 httpx 클라이언트 (커넥션 재사용으로 속도 향상)
+_vworld_client: httpx.AsyncClient | None = None
+
+def _get_vworld_client() -> httpx.AsyncClient:
+    global _vworld_client
+    if _vworld_client is None or _vworld_client.is_closed:
+        _vworld_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=6.0, write=3.0, pool=1.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            headers={
+                "Referer": "https://www.vworld.kr",
+                "User-Agent": "Mozilla/5.0 (compatible; AgriApp/1.0)",
+            },
+        )
+    return _vworld_client
+
+
 @app.get("/proxy/vworld-tile")
 async def proxy_vworld_tile(
     layer: str = "LP_PA_CBND_BUBUN",
@@ -342,35 +475,46 @@ async def proxy_vworld_tile(
     tilerow: int = 0,
     tilecol: int = 0,
 ):
-    """VWorld WMTS 타일 프록시 (CORS 우회)"""
+    """VWorld WMTS 타일 프록시 (CORS 우회, 캐시 최적화)"""
     from app.config import VWORLD_API_KEY
     api_key = VWORLD_API_KEY or ""
     if not api_key:
         raise HTTPException(status_code=503, detail="VWORLD_API_KEY 미설정")
+
+    # 허용된 레이어만 통과 (보안)
+    allowed_layers = {"LP_PA_CBND_BUBUN", "LP_PA_CBND_JIBUN", "white", "midnight"}
+    if layer not in allowed_layers:
+        raise HTTPException(status_code=400, detail=f"허용되지 않은 레이어: {layer}")
 
     url = (
         f"https://api.vworld.kr/req/wmts/1.0.0/{api_key}/{layer}"
         f"/{style}/{tilematrixset}/{tilematrix}/{tilerow}/{tilecol}.png"
     )
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(url, headers={
-                "Referer": "https://www.vworld.kr",
-                "User-Agent": "Mozilla/5.0",
-            })
-            if resp.status_code == 200 and resp.headers.get("content-type","").startswith("image"):
-                return StreamingResponse(
-                    iter([resp.content]),
-                    media_type="image/png",
-                    headers={"Cache-Control": "public, max-age=3600"},
-                )
-            # 오류 응답 내용 로깅
-            raise HTTPException(
-                status_code=resp.status_code,
-                detail=f"VWorld 응답 오류: {resp.text[:200]}"
+        client = _get_vworld_client()
+        resp = await client.get(url)
+        if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image"):
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type="image/png",
+                headers={
+                    "Cache-Control": "public, max-age=86400",  # 24시간 캐시
+                    "X-Tile-Source": "vworld",
+                },
             )
+        # VWorld 오류 → 투명 타일 반환 (지도 깨짐 방지)
+        return StreamingResponse(
+            iter([_TRANSPARENT_PNG]),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
     except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="VWorld 타임아웃")
+        # 타임아웃 → 투명 타일 (브라우저 재시도로 해결됨)
+        return StreamingResponse(
+            iter([_TRANSPARENT_PNG]),
+            media_type="image/png",
+            headers={"Cache-Control": "no-store"},
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -400,3 +544,43 @@ async def proxy_vworld_status():
             }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+@app.get("/proxy/vworld-wms")
+async def proxy_vworld_wms(
+    layers: str = "LP_PA_CBND_JIBUN",
+    bbox: str = "",
+    width: int = 256,
+    height: int = 256,
+    srs: str = "EPSG:4326",
+):
+    """VWorld WMS 프록시 - 지번 표시용 (CORS 우회)"""
+    from app.config import VWORLD_API_KEY
+    api_key = VWORLD_API_KEY or ""
+    if not api_key:
+        raise HTTPException(status_code=503, detail="VWORLD_API_KEY 미설정")
+    if not bbox:
+        raise HTTPException(status_code=400, detail="bbox 필수")
+
+    url = (
+        f"https://api.vworld.kr/req/wms?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+        f"&LAYERS={layers}&STYLES=&FORMAT=image/png&TRANSPARENT=true"
+        f"&SRS={srs}&BBOX={bbox}&WIDTH={width}&HEIGHT={height}"
+        f"&KEY={api_key}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers={"Referer": "https://www.vworld.kr"})
+            if resp.status_code == 200 and "image" in resp.headers.get("content-type", ""):
+                return StreamingResponse(
+                    iter([resp.content]),
+                    media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=300"},
+                )
+            raise HTTPException(status_code=resp.status_code, detail=resp.text[:200])
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="VWorld WMS 타임아웃")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))

@@ -14,6 +14,13 @@ export interface ParcelInfo {
   is_mock?: boolean
 }
 
+export interface ManualLayout {
+  hut_center_wgs84: [number, number]    // [lat, lng]
+  septic_center_wgs84: [number, number] // [lat, lng]
+  hut_rotation_deg: number
+  placement_note?: string
+}
+
 export interface OrderRequest {
   product_type: 'BUNDLE' | 'SEPTIC_ONLY'
   region_code: string
@@ -31,6 +38,7 @@ export interface OrderRequest {
   treatment_mode: 'SEPTIC_DISCHARGE' | 'INFILTRATION' | 'UNKNOWN'
   notes?: string
   parcel?: ParcelInfo | null
+  manual_layout?: ManualLayout | null   // LayoutEditor 배치 결과
 }
 
 export interface OrderResponse {

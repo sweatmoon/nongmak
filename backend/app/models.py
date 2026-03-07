@@ -40,6 +40,14 @@ class ParcelInfo(BaseModel):
     is_mock: Optional[bool] = False
 
 
+class ManualLayout(BaseModel):
+    """LayoutEditor에서 사용자가 직접 배치한 위치 정보"""
+    hut_center_wgs84: List[float]       # [lat, lng]
+    septic_center_wgs84: List[float]    # [lat, lng]
+    hut_rotation_deg: float = 0.0
+    placement_note: Optional[str] = None
+
+
 class OrderRequest(BaseModel):
     product_type: ProductType = ProductType.BUNDLE
     region_code: str = "KR-DJ-YS"
@@ -58,6 +66,8 @@ class OrderRequest(BaseModel):
     notes: Optional[str] = ""
     # 지적도 필지 정보 (지도 선택 시 첨부)
     parcel: Optional[ParcelInfo] = None
+    # 사용자 직접 배치 결과 (LayoutEditor에서 드래그 확정 시)
+    manual_layout: Optional[ManualLayout] = None
 
 
 class OrderResponse(BaseModel):

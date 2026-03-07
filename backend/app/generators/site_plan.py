@@ -219,26 +219,47 @@ def _build_polygon_site_diagram(req, computed, ruleset, parcel: dict, layout: di
         pts_flat.extend([dx, dy])
     if len(pts_flat) >= 6:
         d.add(RLPolygon(pts_flat,
-                        fillColor=colors.HexColor("#DCFCE7"),
+                        fillColor=colors.white,
+                        fillOpacity=0,
                         strokeColor=colors.HexColor("#166534"),
                         strokeWidth=2.0))
 
     # ── 레이어: HUT ──────────────────────────────────────────────────────
     hut = layout.get("hut", {})
     if hut:
-        hx1, hy1 = to_draw(hut["x"], hut["y"])
         hw = hut["w"] * scale
         hd = hut["d"] * scale
-        d.add(Rect(hx1, hy1, hw, hd,
-                   fillColor=colors.HexColor("#DBEAFE"),
-                   strokeColor=colors.HexColor("#1D4ED8"),
-                   strokeWidth=1.5))
-        # 텍스트
+        rot_deg = hut.get("rotation_deg", 0) or 0
         tcx, tcy = to_draw(hut["cx"], hut["cy"])
+        if rot_deg != 0:
+            rad = math.radians(rot_deg)
+            cos_r, sin_r = math.cos(rad), math.sin(rad)
+            corners_local = [
+                (-hw/2, -hd/2), (hw/2, -hd/2),
+                (hw/2,  hd/2), (-hw/2,  hd/2)
+            ]
+            pts_hut = []
+            for (cx_l, cy_l) in corners_local:
+                rx = cx_l * cos_r - cy_l * sin_r
+                ry = cx_l * sin_r + cy_l * cos_r
+                pts_hut.extend([tcx + rx, tcy + ry])
+            d.add(RLPolygon(pts_hut,
+                           fillColor=colors.HexColor("#DBEAFE"),
+                           strokeColor=colors.HexColor("#1D4ED8"),
+                           strokeWidth=1.5))
+        else:
+            hx1, hy1 = to_draw(hut["x"], hut["y"])
+            d.add(Rect(hx1, hy1, hw, hd,
+                       fillColor=colors.HexColor("#DBEAFE"),
+                       strokeColor=colors.HexColor("#1D4ED8"),
+                       strokeWidth=1.5))
         d.add(String(tcx - 8*mm, tcy + 1*mm, "농  막",
                      fontSize=8, fontName=FONT_BOLD, fillColor=colors.HexColor("#1D4ED8")))
-        d.add(String(tcx - 10*mm, tcy - 2.5*mm, f"{req.hut_w_m}m×{req.hut_d_m}m",
+        d.add(String(tcx - 10*mm, tcy - 2.5*mm, f"{req.hut_w_m}m\u00d7{req.hut_d_m}m",
                      fontSize=6.5, fontName=FONT_NAME, fillColor=colors.HexColor("#1D4ED8")))
+        if rot_deg != 0:
+            d.add(String(tcx - 8*mm, tcy - 5.5*mm, f"회전:{rot_deg:.0f}°",
+                         fontSize=5.5, fontName=FONT_NAME, fillColor=colors.HexColor("#6B7280")))
 
     # ── 레이어: SEPTIC ────────────────────────────────────────────────────
     septic = layout.get("septic", {})
