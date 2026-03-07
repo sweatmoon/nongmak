@@ -3,11 +3,12 @@ FastAPI 메인 애플리케이션
 농막 도면 생성 시스템 백엔드
 """
 import uuid
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.config import OUT_DIR, CORS_ORIGINS
 from app.db import init_db, insert_order, get_order, list_orders
@@ -104,11 +105,24 @@ def download_order(order_id: str):
     if not zip_path or not Path(zip_path).exists():
         raise HTTPException(status_code=404, detail="파일이 존재하지 않습니다.")
 
-    return FileResponse(
-        path=zip_path,
+    # 한글 파일명 RFC 5987 인코딩
+    filename_ascii = f"farmhut_package_{order_id}.zip"
+    filename_utf8 = urllib.parse.quote(f"농막도면패키지_{order_id}.zip")
+
+    def iterfile():
+        with open(zip_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        iterfile(),
         media_type="application/zip",
-        filename=f"농막도면패키지_{order_id}.zip",
-        headers={"Content-Disposition": f'attachment; filename*=UTF-8\'\'농막도면패키지_{order_id}.zip'}
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"{filename_ascii}\"; "
+                f"filename*=UTF-8''{filename_utf8}"
+            )
+        },
     )
 
 

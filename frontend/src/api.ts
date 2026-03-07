@@ -1,6 +1,8 @@
 import axios from 'axios'
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+// 모든 API 호출은 Vite 프록시 /api → localhost:8000 을 통해 처리
+// VITE_API_BASE 환경변수가 있어도 프록시로 통일 (CORS 우회)
+const PROXY_BASE = '/api'
 
 export interface OrderRequest {
   product_type: 'BUNDLE' | 'SEPTIC_ONLY'
@@ -29,7 +31,7 @@ export interface OrderResponse {
 }
 
 const api = axios.create({
-  baseURL: API_BASE,
+  baseURL: PROXY_BASE,
   timeout: 60000,
 })
 
@@ -38,8 +40,9 @@ export async function createOrder(req: OrderRequest): Promise<OrderResponse> {
   return res.data
 }
 
+// 다운로드 URL: Vite 프록시를 통해 /api/orders/{id}/download → localhost:8000/orders/{id}/download
 export function getDownloadUrl(orderId: string): string {
-  return `${API_BASE}/orders/${orderId}/download`
+  return `${PROXY_BASE}/orders/${orderId}/download`
 }
 
 export async function checkHealth(): Promise<boolean> {

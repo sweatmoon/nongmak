@@ -14,10 +14,21 @@ export default defineConfig({
     ],
     cors: true,
     proxy: {
+      // /api/* → http://localhost:8000/* (프록시로 CORS 우회)
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
+        // 바이너리 응답(ZIP) 스트리밍도 처리
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            // Content-Disposition 헤더 그대로 전달
+            if (proxyRes.headers['content-disposition']) {
+              proxyRes.headers['content-disposition'] =
+                proxyRes.headers['content-disposition']
+            }
+          })
+        },
       },
     },
   },

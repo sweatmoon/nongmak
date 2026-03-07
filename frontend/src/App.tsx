@@ -654,10 +654,11 @@ function AdminPage({ onBack }: { onBack: () => void }) {
   const [orders, setOrders] = useState<AdminOrder[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+  // 관리자 API도 Vite 프록시 통해 호출
+  const PROXY_BASE = '/api'
 
   useEffect(() => {
-    fetch(`${API_BASE}/orders`).then(r => r.json())
+    fetch(`${PROXY_BASE}/orders`).then(r => r.json())
       .then(data => { setOrders(data.orders || []); setLoading(false) })
       .catch(() => { setError('주문 목록을 불러올 수 없습니다.'); setLoading(false) })
   }, [])
@@ -711,7 +712,7 @@ function AdminPage({ onBack }: { onBack: () => void }) {
                         </td>
                         <td style={{ fontSize: '11px', color: '#64748B' }}>{o.created_at?.slice(0, 16).replace('T', ' ')}</td>
                         <td>
-                          <a href={`${API_BASE}/orders/${o.order_id}/download`} style={{ color: '#2563EB', fontSize: '12px', textDecoration: 'none' }} download>⬇️ ZIP</a>
+                          <a href={`${PROXY_BASE}/orders/${o.order_id}/download`} style={{ color: '#2563EB', fontSize: '12px', textDecoration: 'none' }} download>⬇️ ZIP</a>
                         </td>
                       </tr>
                     ))}
