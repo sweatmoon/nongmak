@@ -147,6 +147,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   const [cadastralOn, setCadastralOn] = useState(false)
   const [jibunOn, setJibunOn] = useState(true)            // 지번 표시 토글 (기본 ON)
   const [vworldReady, setVworldReady] = useState<boolean | null>(null)
+  const [dismissKakaoBanner, setDismissKakaoBanner] = useState(false)
   const addrEmbedRef = useRef<HTMLDivElement>(null)
   const initDoneRef = useRef(false)
 
@@ -617,103 +618,94 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
 
           {/* 지적도/지번 토글 버튼 (Leaflet 모드에서만 표시) */}
           {mapEngine === 'leaflet' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0', flexWrap: 'wrap' }}>
-              {/* 지적도 경계선 토글 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '4px 0', flexWrap: 'wrap' }}>
+
+              {/* ── 위성사진 토글 ── */}
               <button
                 onClick={toggleCadastral}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  padding: '5px 12px', borderRadius: 6, fontSize: '12px',
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 11px', borderRadius: 6, fontSize: '12px',
                   fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-                  border: cadastralOn
-                    ? (vworldReady ? '1.5px solid #166534' : '1.5px solid #1D4ED8')
-                    : '1.5px solid #94A3B8',
-                  background: cadastralOn
-                    ? (vworldReady ? '#DCFCE7' : '#DBEAFE')
-                    : '#F8FAFC',
-                  color: cadastralOn
-                    ? (vworldReady ? '#166534' : '#1D4ED8')
-                    : '#64748B',
+                  border: cadastralOn ? '1.5px solid #1D4ED8' : '1.5px solid #CBD5E1',
+                  background: cadastralOn ? '#EFF6FF' : '#F8FAFC',
+                  color: cadastralOn ? '#1D4ED8' : '#64748B',
                 }}
               >
-                <span style={{ fontSize: 14 }}>
-                  {cadastralOn ? (vworldReady ? '🗂️' : '🛰️') : '🗺️'}
-                </span>
-                {cadastralOn
-                  ? (vworldReady ? '지적도 경계' : '위성사진')
-                  : (vworldReady ? '지적도 경계' : '위성사진')
-                }
+                <span style={{ fontSize: 13 }}>🛰️</span>
+                {vworldReady ? '연속지적도' : '위성사진'}
                 <span style={{
-                  display: 'inline-block', width: 32, height: 16, borderRadius: 8,
-                  background: cadastralOn
-                    ? (vworldReady ? '#166534' : '#1D4ED8')
-                    : '#CBD5E1',
-                  position: 'relative', transition: 'background 0.2s',
+                  display: 'inline-block', width: 28, height: 15, borderRadius: 8,
+                  background: cadastralOn ? '#1D4ED8' : '#CBD5E1',
+                  position: 'relative', transition: 'background 0.2s', marginLeft: 2,
                 }}>
                   <span style={{
-                    position: 'absolute', top: 2,
-                    left: cadastralOn ? 18 : 2,
-                    width: 12, height: 12, borderRadius: '50%',
+                    position: 'absolute', top: 1.5,
+                    left: cadastralOn ? 15 : 2,
+                    width: 11, height: 11, borderRadius: '50%',
                     background: '#fff', transition: 'left 0.2s',
                   }} />
                 </span>
               </button>
 
-              {/* 지번 토글 버튼 */}
+              {/* ── 지번 토글 (VWorld 활성 시에만 활성 스타일) ── */}
               <button
                 onClick={toggleJibun}
-                title={vworldReady ? '지번 표시 (VWorld WMTS · 줌 14+ 자동표시)' : 'VWorld 키 미활성화 시 선택 필지만 표시'}
+                title="지번 표시 (VWorld WMTS · 줌 14 이상에서 자동 표시)"
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  padding: '5px 12px', borderRadius: 6, fontSize: '12px',
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 11px', borderRadius: 6, fontSize: '12px',
                   fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-                  border: jibunOn
-                    ? (vworldReady ? '1.5px solid #92400E' : '1.5px solid #94A3B8')
-                    : '1.5px solid #94A3B8',
-                  background: jibunOn
-                    ? (vworldReady ? '#FEF3C7' : '#F1F5F9')
-                    : '#F8FAFC',
-                  color: jibunOn
-                    ? (vworldReady ? '#92400E' : '#64748B')
-                    : '#64748B',
+                  border: (jibunOn && vworldReady) ? '1.5px solid #92400E' : '1.5px solid #CBD5E1',
+                  background: (jibunOn && vworldReady) ? '#FEF3C7' : '#F8FAFC',
+                  color: (jibunOn && vworldReady) ? '#92400E' : '#64748B',
+                  opacity: vworldReady === null ? 0.5 : 1,
                 }}
               >
                 <span style={{ fontSize: 13 }}>🔢</span>
-                지번{vworldReady ? '' : ' (비활성)'}
+                지번
                 <span style={{
-                  display: 'inline-block', width: 32, height: 16, borderRadius: 8,
-                  background: jibunOn && vworldReady ? '#D97706' : '#CBD5E1',
-                  position: 'relative', transition: 'background 0.2s',
+                  display: 'inline-block', width: 28, height: 15, borderRadius: 8,
+                  background: (jibunOn && vworldReady) ? '#D97706' : '#CBD5E1',
+                  position: 'relative', transition: 'background 0.2s', marginLeft: 2,
                 }}>
                   <span style={{
-                    position: 'absolute', top: 2,
-                    left: jibunOn ? 18 : 2,
-                    width: 12, height: 12, borderRadius: '50%',
+                    position: 'absolute', top: 1.5,
+                    left: jibunOn ? 15 : 2,
+                    width: 11, height: 11, borderRadius: '50%',
                     background: '#fff', transition: 'left 0.2s',
                   }} />
                 </span>
               </button>
 
-              {/* 레이어 상태 안내 */}
-              {(cadastralOn || jibunOn) && (
-                <span style={{ fontSize: '11px', color: '#64748B' }}>
-                  {cadastralOn && vworldReady && '🗂️ 연속지적도 '}
-                  {cadastralOn && !vworldReady && '🛰️ 위성사진 '}
-                  {jibunOn && vworldReady && '· 🔢 지번 (줌14+)'}
-                  {jibunOn && !vworldReady && '· 🔢 선택 필지만'}
-                </span>
+              {/* 상태 텍스트 — VWorld 준비 전에는 숨김 */}
+              {vworldReady === null && (
+                <span style={{ fontSize: '11px', color: '#94A3B8' }}>지적도 로딩 중…</span>
+              )}
+              {vworldReady === false && cadastralOn && (
+                <span style={{ fontSize: '11px', color: '#1D4ED8' }}>🛰️ Esri 위성</span>
+              )}
+              {vworldReady === true && cadastralOn && (
+                <span style={{ fontSize: '11px', color: '#166534' }}>🗂️ VWorld 지적도</span>
+              )}
+              {vworldReady === true && jibunOn && (
+                <span style={{ fontSize: '11px', color: '#92400E' }}>· 지번 줌14+</span>
               )}
             </div>
           )}
 
-          {/* 카카오 SDK 실패 안내 */}
-          {mapEngine === 'leaflet' && (
+          {/* 카카오 SDK 실패 안내 (닫기 가능) */}
+          {mapEngine === 'leaflet' && !dismissKakaoBanner && (
             <div style={{
-              background: '#FFF3CD', border: '1px solid #FBBF24', borderRadius: 6,
-              padding: '8px 12px', fontSize: '12px', color: '#92400E', margin: '4px 0',
+              background: '#FFF8E1', border: '1px solid #FFD54F', borderRadius: 6,
+              padding: '6px 10px', fontSize: '11px', color: '#7B5700', margin: '2px 0',
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
             }}>
-              ⚠️ 카카오 지도 로드 실패 → OpenStreetMap으로 대체됩니다.
-              카카오 개발자 콘솔 → 플랫폼 키 → JS SDK 도메인에 <strong>https://{window.location.host}</strong> 를 추가하세요.
+              <span>⚠️ 카카오 SDK 미연결 → OpenStreetMap 사용 중 (지도 클릭으로 필지 선택 가능)</span>
+              <button
+                onClick={() => setDismissKakaoBanner(true)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7B5700', fontSize: 14, padding: '0 2px', lineHeight: 1 }}
+              >✕</button>
             </div>
           )}
           {mapEngine === 'failed' && (
