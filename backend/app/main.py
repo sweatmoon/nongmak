@@ -328,3 +328,75 @@ def get_order_detail(order_id: str):
     except Exception:
         pass
     return order
+
+
+# ── VWorld 타일/WMS 프록시 ──────────────────────────────────────────────────
+import httpx
+
+@app.get("/proxy/vworld-tile")
+async def proxy_vworld_tile(
+    layer: str = "LP_PA_CBND_BUBUN",
+    style: str = "default",
+    tilematrixset: str = "EPSG:900913",
+    tilematrix: str = "15",
+    tilerow: int = 0,
+    tilecol: int = 0,
+):
+    """VWorld WMTS 타일 프록시 (CORS 우회)"""
+    from app.config import VWORLD_API_KEY
+    api_key = VWORLD_API_KEY or ""
+    if not api_key:
+        raise HTTPException(status_code=503, detail="VWORLD_API_KEY 미설정")
+
+    url = (
+        f"https://api.vworld.kr/req/wmts/1.0.0/{api_key}/{layer}"
+        f"/{style}/{tilematrixset}/{tilematrix}/{tilerow}/{tilecol}.png"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url, headers={
+                "Referer": "https://www.vworld.kr",
+                "User-Agent": "Mozilla/5.0",
+            })
+            if resp.status_code == 200 and resp.headers.get("content-type","").startswith("image"):
+                return StreamingResponse(
+                    iter([resp.content]),
+                    media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=3600"},
+                )
+            # 오류 응답 내용 로깅
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"VWorld 응답 오류: {resp.text[:200]}"
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="VWorld 타임아웃")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/proxy/vworld-status")
+async def proxy_vworld_status():
+    """VWorld API 키 활성화 상태 확인"""
+    from app.config import VWORLD_API_KEY
+    api_key = VWORLD_API_KEY or ""
+    if not api_key:
+        return {"status": "no_key"}
+    # 줌 10 수준 간단한 타일로 테스트
+    url = (
+        f"https://api.vworld.kr/req/wmts/1.0.0/{api_key}/LP_PA_CBND_BUBUN"
+        f"/default/EPSG:900913/10/420/868.png"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers={"Referer": "https://www.vworld.kr"})
+            is_image = resp.status_code == 200 and "image" in resp.headers.get("content-type","")
+            return {
+                "status": "active" if is_image else "pending",
+                "http_code": resp.status_code,
+                "content_type": resp.headers.get("content-type",""),
+            }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

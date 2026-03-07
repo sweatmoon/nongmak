@@ -2,6 +2,16 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# .env 파일 로드
+_env_file = BASE_DIR / ".env"
+if _env_file.exists():
+    for line in _env_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
 DATA_DIR = BASE_DIR / "data"
 RULESETS_DIR = DATA_DIR / "rulesets"
 OUT_DIR = BASE_DIR / "out"
