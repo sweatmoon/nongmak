@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: agri-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: singapore
+    envVars:
+      - key: VWORLD_API_KEY
+        value: 06A8FB0A-790C-3AAA-96B1-2FF3F3F832A8
+      - key: PORT
+        value: 8000
+    healthCheckPath: /health

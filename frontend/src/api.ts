@@ -1,7 +1,10 @@
 import axios from 'axios'
 
-// 모든 API 호출은 Vite 프록시 /api → localhost:8000 을 통해 처리
-const PROXY_BASE = '/api'
+// 개발: Vite 프록시 /api → localhost:8000
+// 운영: VITE_API_BASE 환경변수로 백엔드 URL 직접 지정 (예: https://api.xxx.com)
+const PROXY_BASE = import.meta.env.VITE_API_BASE
+  ? import.meta.env.VITE_API_BASE
+  : '/api'
 
 export interface ParcelInfo {
   jibun?: string
