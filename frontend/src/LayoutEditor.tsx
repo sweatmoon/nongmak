@@ -253,12 +253,13 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
   }
 
   /* ── 연속지적도 레이어 추가 (ref 기반) ──────────────────────────────────── */
-  function _addCadastralLayerNow(_key: string) {
+  // VWorld WMTS 타일은 브라우저(한국 IP)에서 직접 호출해야 합니다.
+  // 백엔드 프록시는 해외 서버에서 VWorld IP 차단으로 동작하지 않습니다.
+  function _addCadastralLayerNow(key: string) {
     const map = leafletMapRef.current
     const L = getL()
     if (!map || !L || cadastralLayerRef.current) return
-    const apiBase = import.meta.env.VITE_API_BASE || '/api'
-    const tileUrl = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
+    const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
     const layer = L.tileLayer(tileUrl, {
       attribution: '© VWorld 연속지적도',
       maxZoom: 19, minZoom: 7,
@@ -362,8 +363,9 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
       cadastralLayerRef.current = null
       setCadastralOn(false)
     } else {
-      const apiBase = import.meta.env.VITE_API_BASE || '/api'
-      const tileUrl = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
+      const key = vworldKeyRef.current
+      if (!key) return
+      const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
       const layer = getL().tileLayer(tileUrl, {
         attribution: '© VWorld 연속지적도',
         maxZoom: 19, minZoom: 7, tileSize: 256, opacity: 1.0, zIndex: 400,

@@ -82,7 +82,7 @@ interface LeafletMap {
   setZoom(z: number): void
   invalidateSize(): void
 }
-interface LeafletLayer { addTo(m: LeafletMap): LeafletLayer; remove(): void }
+interface LeafletLayer { addTo(m: LeafletMap): LeafletLayer; remove(): void; on(event: string, fn: () => void): LeafletLayer }
 interface LeafletStatic {
   map(el: HTMLElement, opts: object): LeafletMap
   tileLayer(url: string, opts: object): LeafletLayer
@@ -188,31 +188,43 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   }, [])
 
   /* ── 레이어 추가 (ref 기반, 클로저 안전) ────────────────────────────────── */
-  function _addLayersNow(_key: string) {
+  // VWorld WMTS 타일은 반드시 브라우저(한국 IP)에서 직접 호출해야 합니다.
+  // 해외 서버(Railway/Render)를 통한 프록시는 VWorld IP 차단으로 동작하지 않습니다.
+  // Leaflet TileLayer는 <img> 태그로 타일을 로드하므로 ERR_BLOCKED_BY_ORB가 발생하지 않습니다.
+  function _addLayersNow(key: string) {
     const map = leafletMapRef.current
     const L = window.L
     if (!map || !L) return
 
-    // 백엔드 프록시 URL 사용 (ERR_BLOCKED_BY_ORB 우회)
-    const apiBase = import.meta.env.VITE_API_BASE || '/api'
-
-    // 연속지적도
+    // 연속지적도 (브라우저에서 VWorld 직접 호출)
     if (!cadastralLayerRef.current) {
-      const url = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
+      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
       const layer = L.tileLayer(url, {
         attribution: '© VWorld 연속지적도',
         maxZoom: 19, minZoom: 7,
         tileSize: 256, opacity: 1.0, zIndex: 400,
       } as object)
+
+      // 타일 로드 성공/실패 감지 (Leaflet 이벤트 기반 - ORB 없음)
+      let loadedCount = 0
+      layer.on('tileload', () => {
+        if (loadedCount === 0) {
+          loadedCount++
+          setTileStatus('ok')
+        }
+      })
+      layer.on('tileerror', () => {
+        setTileStatus('fail')
+      })
+
       layer.addTo(map)
       cadastralLayerRef.current = layer
       setCadastralOn(true)
-      setTileStatus('ok')
     }
 
-    // 지번 레이어
+    // 지번 레이어 (브라우저에서 VWorld 직접 호출)
     if (!jibunLayerRef.current) {
-      const url = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_JIBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
+      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
       const layer = L.tileLayer(url, {
         attribution: '© VWorld 지번',
         maxZoom: 19, minZoom: 14,
@@ -224,14 +236,10 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
     }
   }
 
-  // VWorld 타일 실제 로드 테스트 (img 태그로 직접 요청)
-  function _testTileLoad(key: string) {
-    const testUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/15/27478/13753.png`
-    const img = new Image()
-    img.onload = () => setTileStatus('ok')
-    img.onerror = () => setTileStatus('fail')
-    img.src = testUrl
-  }
+  // _testTileLoad: new Image()로 VWorld를 직접 호출하면 ERR_BLOCKED_BY_ORB 발생
+  // Leaflet tileload/tileerror 이벤트로 대체했으므로 이 함수는 더 이상 사용하지 않음
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  function _testTileLoad(_key: string) { /* deprecated */ }
 
   function _addEsriFallback() {
     const map = leafletMapRef.current
@@ -265,6 +273,9 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
           maxZoom: 19, minZoom: 7,
           tileSize: 256, opacity: 1.0, zIndex: 400,
         } as object)
+        let loadedCount = 0
+        layer.on('tileload', () => { if (loadedCount === 0) { loadedCount++; setTileStatus('ok') } })
+        layer.on('tileerror', () => setTileStatus('fail'))
         layer.addTo(map)
         cadastralLayerRef.current = layer
         setCadastralOn(true)
