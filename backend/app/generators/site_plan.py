@@ -334,8 +334,8 @@ def _build_polygon_site_diagram(req, computed, ruleset, parcel: dict, layout: di
     return d
 
 
-
-    """배치도 SVG-like 다이어그램 생성"""
+def _build_site_diagram(req, computed, ruleset) -> Drawing:
+    """배치도 SVG-like 다이어그램 생성 (polygon 없을 때 fallback)"""
     W, H = 170*mm, 110*mm
     d = Drawing(W, H)
 

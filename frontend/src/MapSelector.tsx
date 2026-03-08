@@ -158,6 +158,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   const [vworldKey, setVworldKey] = useState<string>('')
   const [vworldReady, setVworldReady] = useState<boolean | null>(null)
   const [dismissBanner, setDismissBanner] = useState(false)
+  const [tileStatus, setTileStatus] = useState<'unknown' | 'ok' | 'fail'>('unknown')
   const addrEmbedRef = useRef<HTMLDivElement>(null)
   const initDoneRef = useRef(false)
 
@@ -202,6 +203,9 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       layer.addTo(map)
       cadastralLayerRef.current = layer
       setCadastralOn(true)
+
+      // 타일 로드 성공/실패 감지
+      _testTileLoad(key)
     }
 
     // 지번 레이어
@@ -216,6 +220,15 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       jibunLayerRef.current = layer
       setJibunOn(true)
     }
+  }
+
+  // VWorld 타일 실제 로드 테스트 (img 태그로 직접 요청)
+  function _testTileLoad(key: string) {
+    const testUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/15/27478/13753.png`
+    const img = new Image()
+    img.onload = () => setTileStatus('ok')
+    img.onerror = () => setTileStatus('fail')
+    img.src = testUrl
   }
 
   function _addEsriFallback() {
@@ -662,7 +675,21 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
               {vworldReady === null && (
                 <span style={{ fontSize: '11px', color: '#94A3B8' }}>⏳ VWorld 연결 중…</span>
               )}
-              {vworldReady === true && (
+              {vworldReady === true && tileStatus === 'ok' && (
+                <span style={{ fontSize: '11px', color: '#166534', fontWeight: 600 }}>
+                  ✅ VWorld 연속지적도 표시 중
+                </span>
+              )}
+              {vworldReady === true && tileStatus === 'fail' && (
+                <span style={{ fontSize: '11px', color: '#DC2626', fontWeight: 600 }}>
+                  ⚠️ VWorld 타일 로드 실패 — <a
+                    href="https://api.vworld.kr/console/apikey/list"
+                    target="_blank" rel="noreferrer"
+                    style={{ color: '#DC2626', textDecoration: 'underline' }}
+                  >API 콘솔</a>에서 서비스 URL 등록 확인 필요
+                </span>
+              )}
+              {vworldReady === true && tileStatus === 'unknown' && (
                 <span style={{ fontSize: '11px', color: '#166534', fontWeight: 600 }}>
                   ✅ VWorld 연속지적도 연결됨
                 </span>
@@ -685,6 +712,21 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
               <span>💡 카카오 지도 미연결 → OpenStreetMap + VWorld 연속지적도 오버레이 사용 중</span>
               <button onClick={() => setDismissBanner(true)}
                 style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7B5700', fontSize: 14 }}>✕</button>
+            </div>
+          )}
+
+          {/* ── VWorld 타일 실패 안내 배너 ── */}
+          {tileStatus === 'fail' && (
+            <div style={{
+              background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 6,
+              padding: '8px 12px', fontSize: '11px', color: '#991B1B', margin: '2px 0', lineHeight: 1.7,
+            }}>
+              <strong>⚠️ VWorld 연속지적도 타일이 로드되지 않습니다.</strong><br />
+              해결 방법: <a href="https://api.vworld.kr/console/apikey/list" target="_blank" rel="noreferrer"
+                style={{ color: '#1D4ED8', fontWeight: 700, textDecoration: 'underline' }}>
+                VWorld API 콘솔
+              </a>에서 API키 설정 → <strong>서비스 URL</strong>에 현재 주소를 추가해야 합니다.<br />
+              현재 페이지 주소: <code style={{ background: '#FEE2E2', padding: '1px 4px', borderRadius: 3 }}>{window.location.origin}</code>
             </div>
           )}
           {mapEngine === 'failed' && (

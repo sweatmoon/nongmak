@@ -566,6 +566,19 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
                   카카오 지도에서 필지를 클릭하면 지적도 polygon이 자동으로 인식됩니다.
                   실제 토지 경계 기반 배치도를 생성합니다.
                 </div>
+                <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 4 }}>
+                  💡 연속지적도가 보이지 않으면{' '}
+                  <a
+                    href="https://api.vworld.kr/console/apikey/list"
+                    target="_blank" rel="noreferrer"
+                    style={{ color: '#1D4ED8', textDecoration: 'underline' }}
+                  >VWorld API 콘솔</a>
+                  {' '}→ API키 선택 → <strong>서비스 URL</strong>에{' '}
+                  <code style={{ background: '#F1F5F9', padding: '1px 4px', borderRadius: 3, fontSize: 11 }}>
+                    {typeof window !== 'undefined' ? window.location.origin : '현재 주소'}
+                  </code>
+                  을 추가하세요.
+                </div>
               </div>
               <button
                 type="button"
