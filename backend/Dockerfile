@@ -21,9 +21,9 @@ COPY . .
 # out 디렉토리 생성
 RUN mkdir -p out
 
-# Railway는 $PORT 환경변수로 포트를 동적 할당
-# EXPOSE는 문서용 (실제 포트는 $PORT 사용)
+# 시작 스크립트 실행 권한
+RUN chmod +x start.sh
+
 EXPOSE 8000
 
-# 실행: sh를 통해 $PORT 환경변수 사용
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+CMD ["/bin/sh", "start.sh"]
