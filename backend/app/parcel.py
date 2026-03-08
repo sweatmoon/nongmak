@@ -117,27 +117,68 @@ async def _geocode_kakao(address: str) -> Optional[tuple[float, float]]:
     return None
 
 
+def pnu_to_jibun(pnu: str) -> str:
+    """
+    19자리 PNU 코드를 지번 주소 문자열로 변환
+    예: 3017010200100430000 → 대전 유성구 방동 43
+    PNU 구조: 5자리 법정동코드 + 4자리 읍면동 + 2자리 리 + 1자리 대지구분 + 4자리 본번 + 4자리 부번
+    """
+    if not pnu or len(pnu) < 19:
+        return pnu or ""
+    try:
+        bon = int(pnu[11:15])  # 본번
+        bu = int(pnu[15:19])   # 부번
+        if bu > 0:
+            return f"{bon}-{bu}"
+        return str(bon)
+    except Exception:
+        return pnu
+
+
 def _parse_vworld_feature(feature: dict) -> dict:
     """VWorld GeoJSON feature → 내부 표준 형식"""
     props = feature.get("properties", {})
     geom = feature.get("geometry", {})
 
-    # polygon 좌표 추출
-    coords_raw = geom.get("coordinates", [[]])[0]  # 외곽 ring
+    # polygon 좌표 추출 (MultiPolygon 대응)
+    geom_type = geom.get("type", "Polygon")
+    if geom_type == "MultiPolygon":
+        # 가장 큰 ring 선택
+        all_rings = [ring for poly in geom.get("coordinates", []) for ring in poly]
+        coords_raw = max(all_rings, key=len) if all_rings else []
+    else:
+        coords_raw = geom.get("coordinates", [[]])[0]  # 외곽 ring
+
     polygon_wgs84 = [[c[0], c[1]] for c in coords_raw]
 
     cx, cy = polygon_centroid(polygon_wgs84)
     polygon_local = [wgs84_to_local(c[0], c[1], cx, cy) for c in polygon_wgs84]
     area = polygon_area_m2(polygon_local)
 
+    # 지번 파싱: pnu → 지번 변환 우선, 없으면 lbm_nm/addr 사용
+    pnu = props.get("pnu", "")
+    lbm_nm = props.get("lbm_nm", "")   # 법정동명 (예: 대전광역시 유성구 방동)
+    addr = props.get("addr", "") or props.get("lbm_addr", "")
+    jibun_num = pnu_to_jibun(pnu)
+
+    if lbm_nm and jibun_num and not jibun_num.startswith("30"):
+        jibun = f"{lbm_nm} {jibun_num}"
+    elif addr:
+        jibun = addr
+    elif pnu:
+        jibun = pnu
+    else:
+        jibun = ""
+
     return {
-        "jibun": props.get("pnu", "") or props.get("addr", ""),
+        "jibun": jibun,
         "area_m2": round(area, 1),
-        "jimok": props.get("jimok_nm", ""),
-        "yongdo": props.get("prpos_area1_nm", ""),
+        "jimok": props.get("jimok_nm", "") or props.get("jimok", ""),
+        "yongdo": props.get("prpos_area1_nm", "") or props.get("prpos_area", ""),
         "polygon_wgs84": polygon_wgs84,
         "polygon_local": [[round(x, 3), round(y, 3)] for x, y in polygon_local],
         "centroid": {"lon": round(cx, 7), "lat": round(cy, 7)},
+        "is_mock": False,
     }
 
 

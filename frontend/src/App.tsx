@@ -747,10 +747,34 @@ function FormPage({ form, setForm, loading, setLoading, error, setError, result,
               </div>
             )}
 
-            <button type="submit" className="btn-primary" disabled={loading || revising}>
+            {/* 필지 미선택 경고 */}
+            {!form.parcel && !result && (
+              <div style={{
+                background: '#FEF9C3', border: '1.5px solid #FCD34D',
+                borderRadius: 8, padding: '10px 16px', margin: '8px 0',
+                display: 'flex', alignItems: 'center', gap: 10,
+                fontSize: 13, color: '#92400E',
+              }}>
+                <span style={{ fontSize: 18 }}>🗺️</span>
+                <div>
+                  <strong>토지를 먼저 선택해주세요</strong><br />
+                  <span style={{ fontSize: 11, opacity: 0.85 }}>
+                    위 "지도에서 토지 선택" 버튼을 눌러 실제 설치 대상 필지를 지도에서 클릭하여 선택해야 배치도를 생성할 수 있습니다.
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="btn-primary"
+              disabled={loading || revising || (!form.parcel && !result)}
+              style={!form.parcel && !result ? { opacity: 0.5, cursor: 'not-allowed' } : {}}
+            >
               {loading ? <><span className="spinner" /> 패키지 생성 중...</>
                 : revising ? <><span className="spinner" /> 재생성 중...</>
                 : isReviseMode ? `🔄 수정 후 재생성 (${result!.revision_count + 1}/${result!.max_revision}회)`
+                : !form.parcel ? '🗺️ 토지를 먼저 선택하세요'
                 : (form.parcel && !layoutResult && !result)
                   ? '🗺️ 배치 미리보기 → 패키지 생성'
                   : '🗂️ 패키지 생성'}

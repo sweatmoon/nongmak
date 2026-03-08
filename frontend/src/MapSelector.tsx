@@ -1,7 +1,15 @@
 /**
  * MapSelector.tsx
- * 카카오 지도 + VWorld 지적도 polygon 오버레이
- * 카카오 SDK 실패 시 → Leaflet(OSM) 폴백
+ * VWorld 연속지적도 기반 필지 선택 컴포넌트
+ *
+ * 원칙:
+ * 1. 지도 로드 즉시 연속지적도(LP_PA_CBND_BUBUN) + 지번(LP_PA_CBND_JIBUN) 자동 ON
+ * 2. 주소 검색 = 지도 위치 이동만 (필지 자동 선택 X)
+ * 3. 사용자가 지도에서 직접 클릭한 필지 polygon = 실제 농막 설치 대상 토지
+ *
+ * 타이밍 해결:
+ * - vworldKey를 useRef로도 관리 → 클로저 캡처 문제 없음
+ * - 지도 초기화 완료 직후 레이어 추가 (setTimeout 0ms)
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { ParcelInfo, fetchParcelByCoord } from './api'
@@ -63,19 +71,25 @@ interface DaumPostcodeResult {
   address: string; jibunAddress: string; roadAddress: string; zonecode: string
 }
 
-/* ── Leaflet 타입 (폴백용 최소 정의) ─────────────────────────────────────── */
+/* ── Leaflet 타입 ─────────────────────────────────────────────────────────── */
 interface LeafletLatLng { lat: number; lng: number }
 interface LeafletMap {
   setView(ll: [number, number], zoom: number): void
   on(ev: string, cb: (e: { latlng: LeafletLatLng }) => void): void
   panTo(ll: [number, number]): void
+  fitBounds(bounds: [[number,number],[number,number]], opts?: object): void
+  getZoom(): number
+  setZoom(z: number): void
+  invalidateSize(): void
 }
 interface LeafletLayer { addTo(m: LeafletMap): LeafletLayer; remove(): void }
 interface LeafletStatic {
   map(el: HTMLElement, opts: object): LeafletMap
   tileLayer(url: string, opts: object): LeafletLayer
   marker(ll: [number, number], opts?: object): LeafletLayer
-  polygon(lls: [number, number][], opts: object): LeafletLayer
+  polygon(lls: [number, number][], opts: object): LeafletLayer & {
+    getBounds(): { getSouthWest(): LeafletLatLng; getNorthEast(): LeafletLatLng }
+  }
   divIcon(opts: object): object
   DomUtil: { create(tag: string, cls: string): HTMLElement }
 }
@@ -92,8 +106,7 @@ function loadScript(src: string, id: string): Promise<void> {
   return new Promise((resolve, reject) => {
     if (document.getElementById(id)) { resolve(); return }
     const s = document.createElement('script')
-    s.src = src
-    s.id = id
+    s.src = src; s.id = id
     s.onload = () => resolve()
     s.onerror = () => reject(new Error(`Failed to load: ${src}`))
     document.head.appendChild(s)
@@ -102,20 +115,16 @@ function loadScript(src: string, id: string): Promise<void> {
 
 async function ensureLeaflet(): Promise<boolean> {
   if (window.L) return true
-  // Leaflet CSS
   if (!document.getElementById('leaflet-css')) {
     const link = document.createElement('link')
-    link.id = 'leaflet-css'
-    link.rel = 'stylesheet'
+    link.id = 'leaflet-css'; link.rel = 'stylesheet'
     link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'
     document.head.appendChild(link)
   }
   try {
     await loadScript('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js', 'leaflet-js')
     return !!window.L
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
 /* ── 컴포넌트 ──────────────────────────────────────────────────────────────── */
@@ -126,17 +135,17 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
 
   // Kakao 참조
   const kakaoMapRef = useRef<KakaoMap | null>(null)
-  const kakaoMarkerRef = useRef<KakaoMarker | null>(null)
   const kakaoPolygonRef = useRef<KakaoPolygon | null>(null)
   const kakaoOverlayRef = useRef<KakaoOverlay | null>(null)
 
   // Leaflet 참조
   const leafletMapRef = useRef<LeafletMap | null>(null)
-  const leafletLayersRef = useRef<LeafletLayer[]>([])
-  const leafletBaseRef = useRef<LeafletLayer | null>(null)
+  const leafletParcelLayersRef = useRef<LeafletLayer[]>([])
   const cadastralLayerRef = useRef<LeafletLayer | null>(null)
-  const jibunLayerRef = useRef<LeafletLayer | null>(null)  // 지번 오버레이
-  const jibunFallbackRef = useRef<LeafletLayer | null>(null) // 지번 폴백 마커
+  const jibunLayerRef = useRef<LeafletLayer | null>(null)
+
+  // vworldKey를 ref로도 관리 → useCallback 클로저 캡처 문제 해결
+  const vworldKeyRef = useRef<string>('')
 
   const [mapEngine, setMapEngine] = useState<MapEngine>('loading')
   const [searchQuery, setSearchQuery] = useState(initialAddress || '')
@@ -145,309 +154,262 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   const [error, setError] = useState<string | null>(null)
   const [showAddrSearch, setShowAddrSearch] = useState(false)
   const [cadastralOn, setCadastralOn] = useState(false)
-  const [jibunOn, setJibunOn] = useState(true)            // 지번 표시 토글 (기본 ON)
-  const [vworldReady, setVworldReady] = useState<boolean | null>(null)
+  const [jibunOn, setJibunOn] = useState(false)
   const [vworldKey, setVworldKey] = useState<string>('')
-  const [dismissKakaoBanner, setDismissKakaoBanner] = useState(false)
+  const [vworldReady, setVworldReady] = useState<boolean | null>(null)
+  const [dismissBanner, setDismissBanner] = useState(false)
   const addrEmbedRef = useRef<HTMLDivElement>(null)
   const initDoneRef = useRef(false)
 
-  // VWorld API 키 획득 → 브라우저 직접 WMTS 호출로 상태 확인
+  /* ── VWorld API 키 로드 ─────────────────────────────────────────────────── */
   useEffect(() => {
     fetch('/api/vworld-key')
       .then(r => r.json())
       .then(d => {
         const key = d.key || ''
+        vworldKeyRef.current = key   // ← ref 즉시 업데이트
         setVworldKey(key)
-        if (!key) { setVworldReady(false); return }
-        // 브라우저에서 직접 VWorld 타일 1장 요청해 키 활성 여부 확인
-        const testUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/10/420/868.png`
-        fetch(testUrl, { mode: 'no-cors' })
-          .then(() => setVworldReady(true))
-          .catch(() => setVworldReady(true)) // no-cors면 opaque → 성공으로 간주
+        setVworldReady(!!key)
+        // 이미 지도가 준비됐다면 즉시 레이어 추가
+        if (key && leafletMapRef.current && window.L) {
+          _addLayersNow(key)
+        }
       })
       .catch(() => {
-        // /api/vworld-key 실패 시 백엔드 status 체크 fallback
-        fetch('/api/proxy/vworld-status')
-          .then(r => r.json())
-          .then(d => setVworldReady(d.status === 'active'))
-          .catch(() => setVworldReady(false))
+        setVworldReady(false)
+        // VWorld 없으면 Esri 위성으로 폴백
+        if (leafletMapRef.current && window.L) {
+          _addEsriFallback()
+        }
       })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /* ── 레이어 추가 (ref 기반, 클로저 안전) ────────────────────────────────── */
+  function _addLayersNow(key: string) {
+    const map = leafletMapRef.current
+    const L = window.L
+    if (!map || !L) return
 
-  // 필지 선택 시 지번 마커는 drawParcelPolygon 내에서 처리
-  // (이 useEffect는 더 이상 필요하지 않음)
+    // 연속지적도
+    if (!cadastralLayerRef.current) {
+      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const layer = L.tileLayer(url, {
+        attribution: '© VWorld 연속지적도',
+        maxZoom: 19, minZoom: 7,
+        tileSize: 256, opacity: 1.0, zIndex: 400,
+      } as object)
+      layer.addTo(map)
+      cadastralLayerRef.current = layer
+      setCadastralOn(true)
+    }
 
-  /* ── 지번 오버레이 ON (내부 헬퍼) ─────────────────────────────────────── */
-  const enableJibunLayer = useCallback(() => {
-    if (!leafletMapRef.current || !window.L) return
-    // 이미 있으면 제거 후 재생성 (중복 방지)
+    // 지번 레이어
+    if (!jibunLayerRef.current) {
+      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const layer = L.tileLayer(url, {
+        attribution: '© VWorld 지번',
+        maxZoom: 19, minZoom: 14,
+        tileSize: 256, opacity: 1.0, zIndex: 450,
+      } as object)
+      layer.addTo(map)
+      jibunLayerRef.current = layer
+      setJibunOn(true)
+    }
+  }
+
+  function _addEsriFallback() {
+    const map = leafletMapRef.current
+    const L = window.L
+    if (!map || !L || cadastralLayerRef.current) return
+    const layer = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { attribution: '© Esri 위성사진', maxZoom: 19, zIndex: 400 } as object
+    )
+    layer.addTo(map)
+    cadastralLayerRef.current = layer
+    setCadastralOn(true)
+  }
+
+  /* ── 연속지적도 토글 ─────────────────────────────────────────────────────── */
+  const toggleCadastral = useCallback(() => {
+    const map = leafletMapRef.current
+    const L = window.L
+    if (!map || !L) return
+
+    if (cadastralLayerRef.current) {
+      cadastralLayerRef.current.remove()
+      cadastralLayerRef.current = null
+      setCadastralOn(false)
+    } else {
+      const key = vworldKeyRef.current  // ref에서 직접 읽기
+      if (key) {
+        const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+        const layer = L.tileLayer(url, {
+          attribution: '© VWorld 연속지적도',
+          maxZoom: 19, minZoom: 7,
+          tileSize: 256, opacity: 1.0, zIndex: 400,
+        } as object)
+        layer.addTo(map)
+        cadastralLayerRef.current = layer
+        setCadastralOn(true)
+      } else {
+        _addEsriFallback()
+      }
+    }
+  }, [])
+
+  /* ── 지번 토글 ──────────────────────────────────────────────────────────── */
+  const toggleJibun = useCallback(() => {
+    const map = leafletMapRef.current
+    const L = window.L
+    if (!map || !L) return
+
     if (jibunLayerRef.current) {
       jibunLayerRef.current.remove()
       jibunLayerRef.current = null
-    }
-    if (vworldReady && vworldKey) {
-      // VWorld WMTS 직접 URL (브라우저 → api.vworld.kr 직접 호출, CORS 허용)
-      const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
-      const jibunLayer = window.L.tileLayer(
-        tileUrl,
-        {
-          attribution: '© VWorld 지번',
-          maxZoom: 19, minZoom: 14,  // 줌 14+ 에서만 표시 (가독성 확보)
-          tileSize: 256,
-          opacity: 1.0,
-          zIndex: 450,  // 지적도 레이어보다 위
-        } as object
-      )
-      jibunLayer.addTo(leafletMapRef.current)
-      jibunLayerRef.current = jibunLayer
+      setJibunOn(false)
+    } else {
+      const key = vworldKeyRef.current
+      if (!key) return
+      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const layer = L.tileLayer(url, {
+        attribution: '© VWorld 지번',
+        maxZoom: 19, minZoom: 14,
+        tileSize: 256, opacity: 1.0, zIndex: 450,
+      } as object)
+      layer.addTo(map)
+      jibunLayerRef.current = layer
       setJibunOn(true)
     }
-  }, [vworldReady, vworldKey])
+  }, [])
 
-
-  /* ── 카카오 지도 초기화 ────────────────────────────────────────────────── */
+  /* ── 카카오 지도 초기화 ─────────────────────────────────────────────────── */
   const initKakaoMap = useCallback(() => {
-    if (!mapContainerRef.current) {
-      console.error('[Kakao] mapContainerRef가 null!')
-      return
-    }
-    if (!window.kakao?.maps?.Map) {
-      console.error('[Kakao] kakao.maps.Map 없음!')
-      return
-    }
+    if (!mapContainerRef.current || !window.kakao?.maps?.Map) return
     try {
       const center = new window.kakao.maps.LatLng(36.3748, 127.3445)
-      const map = new window.kakao.maps.Map(mapContainerRef.current, { center, level: 5 })
+      const map = new window.kakao.maps.Map(mapContainerRef.current, { center, level: 4 })
       kakaoMapRef.current = map
       setMapEngine('kakao')
-      console.log('[Kakao] 지도 초기화 성공!')
 
       window.kakao.maps.event.addListener(map, 'click', async (e: unknown) => {
         const ev = e as { latLng: KakaoLatLng }
         await loadParcel(ev.latLng.getLng(), ev.latLng.getLat())
       })
 
-      if (initialAddress) searchAddressKakao(initialAddress)
-    } catch (err) {
-      console.error('[Kakao] initMap 오류:', err)
+      if (initialAddress) moveToAddressKakao(initialAddress)
+    } catch {
       initLeafletMap()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  /* ── Leaflet 지도 초기화 ───────────────────────────────────────────────── */
+  /* ── Leaflet 지도 초기화 ────────────────────────────────────────────────── */
   const initLeafletMap = useCallback(async () => {
     const ok = await ensureLeaflet()
-    if (!ok || !mapContainerRef.current || !window.L) {
-      setMapEngine('failed')
-      return
-    }
+    if (!ok || !mapContainerRef.current || !window.L) { setMapEngine('failed'); return }
+
     try {
       mapContainerRef.current.innerHTML = ''
-      const map = window.L.map(mapContainerRef.current, { center: [36.3748, 127.3445], zoom: 16 } as object)
+      const L = window.L
+      const map = L.map(mapContainerRef.current, {
+        center: [36.3748, 127.3445], zoom: 16,
+      } as object)
 
-      // 베이스 레이어: OSM
-      const baseLayer = window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
-        maxZoom: 19,
-        opacity: 1,
-      }).addTo(map)
-      leafletBaseRef.current = baseLayer
+      // ── 베이스 레이어: OSM ──
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors', maxZoom: 19,
+      } as object).addTo(map)
 
       leafletMapRef.current = map
       setMapEngine('leaflet')
 
+      // ── 지도 초기화 직후 VWorld 레이어 추가 ──
+      // vworldKeyRef가 이미 채워져 있으면 즉시, 아니면 fetch 완료 후 자동 실행
+      setTimeout(() => {
+        const key = vworldKeyRef.current
+        if (key) {
+          _addLayersNow(key)
+        }
+        // key가 없으면 fetch 완료 시 _addLayersNow or _addEsriFallback 호출됨
+      }, 100)
+
+      // 클릭 → 필지 조회
       map.on('click', async (e: { latlng: LeafletLatLng }) => {
         await loadParcel(e.latlng.lng, e.latlng.lat)
       })
 
-      // 지도 초기화 후 VWorld가 이미 준비된 상태라면 즉시 지번 레이어 ON
-      // (vworldReady는 비동기로 세팅되므로, 이미 세팅된 경우 처리)
-      setTimeout(() => {
-        if (vworldReady === true && jibunLayerRef.current === null) {
-          enableJibunLayer()
-        }
-      }, 300)
-    } catch (err) {
-      console.error('[Leaflet] initMap 오류:', err)
-      setMapEngine('failed')
-    }
-  }, [vworldReady, enableJibunLayer])
+      // initialAddress가 있으면 위치 이동만
+      if (initialAddress) await moveToAddressNominatim(initialAddress, false)
 
-  /* ── 지적도 토글 (OSM 배경 유지 + VWorld 오버레이 ON/OFF) ──────────────── */
-  const toggleCadastral = useCallback(() => {
-    if (!leafletMapRef.current || !window.L) return
+    } catch { setMapEngine('failed') }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
-    if (cadastralLayerRef.current) {
-      // 끄기 → VWorld 지적도 레이어 제거 (OSM 배경은 항상 유지)
-      cadastralLayerRef.current.remove()
-      cadastralLayerRef.current = null
-      setCadastralOn(false)
-    } else {
-      if (vworldReady && vworldKey) {
-        // ✅ VWorld 활성화: 브라우저 직접 WMTS URL 사용 (백엔드 프록시 불필요)
-        // LP_PA_CBND_BUBUN: 연속지적도 경계선 레이어 (배경 투명)
-        const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
-        const overlayLayer = window.L.tileLayer(
-          tileUrl,
-          {
-            attribution: '© VWorld 연속지적도',
-            maxZoom: 19, minZoom: 7,
-            tileSize: 256,
-            opacity: 1.0,   // 완전 불투명 (배경은 OSM이 담당)
-            zIndex: 400,    // OSM 위에 표시
-          } as object
-        )
-        overlayLayer.addTo(leafletMapRef.current)
-        cadastralLayerRef.current = overlayLayer
-        setCadastralOn(true)
+  /* ── 주소 → 지도 이동 (카카오) ─────────────────────────────────────────── */
+  const moveToAddressKakao = (query: string) => {
+    if (!query.trim() || !window.kakao?.maps?.services) return
+    const geocoder = new window.kakao.maps.services.Geocoder()
+    geocoder.addressSearch(query, (results, status) => {
+      if (status === window.kakao.maps.services.Status.OK && results[0]) {
+        const lon = parseFloat(results[0].x), lat = parseFloat(results[0].y)
+        kakaoMapRef.current?.setCenter(new window.kakao.maps.LatLng(lat, lon))
+        kakaoMapRef.current?.setLevel(3)
       } else {
-        // ⏳ VWorld 키 없음: Esri 위성사진으로 대체
-        const overlayLayer = window.L.tileLayer(
-          'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-          {
-            attribution: '© Esri 위성사진',
-            maxZoom: 19,
-            zIndex: 400,
-          } as object
-        )
-        overlayLayer.addTo(leafletMapRef.current)
-        cadastralLayerRef.current = overlayLayer
-        setCadastralOn(true)
+        setError('주소를 찾을 수 없습니다. 지도에서 직접 클릭하여 필지를 선택해주세요.')
       }
-    }
-  }, [vworldReady, vworldKey])
+    })
+  }
 
-  // VWorld 준비 완료 시 지번 레이어 자동 활성화
-  useEffect(() => {
-    if (vworldReady === true && leafletMapRef.current && window.L) {
-      // 지번 레이어가 아직 없고 jibunOn 상태면 자동 생성
-      if (!jibunLayerRef.current && jibunOn) {
-        enableJibunLayer()
-      }
-    }
-  }, [vworldReady, jibunOn, enableJibunLayer])
-
-  /* ── 지번 오버레이 토글 ─────────────────────────────────────────────────── */
-  const toggleJibun = useCallback(() => {
-    if (!leafletMapRef.current || !window.L) return
-
-    if (jibunLayerRef.current) {
-      // 끄기
-      jibunLayerRef.current.remove()
-      jibunLayerRef.current = null
-      if (jibunFallbackRef.current) {
-        jibunFallbackRef.current.remove()
-        jibunFallbackRef.current = null
-      }
-      setJibunOn(false)
-    } else {
-      if (vworldReady) {
-        enableJibunLayer()
+  /* ── 주소 → 지도 이동 (Nominatim) ──────────────────────────────────────── */
+  const moveToAddressNominatim = async (query: string, autoSelect = false) => {
+    if (!query.trim()) return
+    setLoading(true); setError(null)
+    try {
+      const res = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&accept-language=ko`
+      )
+      const data = await res.json()
+      if (data[0]) {
+        const lat = parseFloat(data[0].lat), lon = parseFloat(data[0].lon)
+        leafletMapRef.current?.setView([lat, lon], 17)
+        if (autoSelect) await loadParcel(lon, lat)
       } else {
-        // VWorld 미활성화 시 → 선택된 필지 centroid에 지번 라벨 표시
-        if (parcel?.jibun && parcel?.centroid) {
-          const { lat, lon } = parcel.centroid
-          const icon = (window.L as unknown as {
-            divIcon: (o: object) => object
-          }).divIcon({
-            html: `<div style="background:rgba(255,255,255,0.92);border:1.5px solid #166534;border-radius:4px;padding:2px 7px;font-size:11px;font-weight:700;color:#166534;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15);">${parcel.jibun}</div>`,
-            className: '',
-            iconAnchor: [0, 0],
-          })
-          const marker = window.L.marker([lat, lon], { icon } as object)
-          marker.addTo(leafletMapRef.current)
-          jibunFallbackRef.current = marker
-          setJibunOn(true)
-        }
+        setError('주소를 찾을 수 없습니다. 지도에서 직접 클릭하여 필지를 선택해주세요.')
       }
-    }
-  }, [vworldReady, parcel, enableJibunLayer])
+    } catch {
+      setError('주소 검색에 실패했습니다.')
+    } finally { setLoading(false) }
+  }
 
-  /* ── 지도 엔진 선택 useEffect ──────────────────────────────────────────── */
-  useEffect(() => {
-    if (initDoneRef.current) return
-    initDoneRef.current = true
-
-    const tryInit = () => {
-      // DOM ref가 아직 없으면 패스
-      if (!mapContainerRef.current) return false
-
-      // 에러 발생 시 바로 Leaflet
-      if (window.__kakaoMapsError) {
-        console.warn('[Map] 카카오 SDK onerror → Leaflet 폴백')
-        initLeafletMap()
-        return true
-      }
-
-      // __kakaoMapsReady 플래그 또는 kakao.maps.Map 직접 확인
-      const kakaoOk = window.__kakaoMapsReady && window.kakao?.maps?.Map
-      if (kakaoOk) {
-        console.log('[Map] 카카오 SDK 준비 완료 → initKakaoMap')
-        initKakaoMap()
-        return true
-      }
-
-      return false
-    }
-
-    // 즉시 1회 시도
-    if (tryInit()) return
-
-    // 최대 6초 대기 (100ms 간격)
-    let waited = 0
-    const timer = setInterval(() => {
-      waited += 100
-      if (tryInit()) {
-        clearInterval(timer)
-        return
-      }
-      if (waited >= 6000) {
-        clearInterval(timer)
-        console.warn('[Map] 6초 타임아웃 → Leaflet 폴백')
-        initLeafletMap()
-      }
-    }, 100)
-
-    return () => clearInterval(timer)
-  }, [initKakaoMap, initLeafletMap])
-
-  /* ── 필지 조회 ─────────────────────────────────────────────────────────── */
-  const loadParcel = useCallback(async (lon: number, lat: number) => {
-    setLoading(true)
+  /* ── 검색 핸들러 ────────────────────────────────────────────────────────── */
+  const handleSearch = () => {
     setError(null)
+    if (mapEngine === 'kakao') moveToAddressKakao(searchQuery)
+    else moveToAddressNominatim(searchQuery, false)
+  }
 
-    // 마커 표시
-    if (mapEngine === 'kakao' && kakaoMapRef.current && window.kakao?.maps) {
-      const ll = new window.kakao.maps.LatLng(lat, lon)
-      if (!kakaoMarkerRef.current) {
-        kakaoMarkerRef.current = new window.kakao.maps.Marker({ position: ll, map: kakaoMapRef.current })
-      } else {
-        kakaoMarkerRef.current.setPosition(ll)
-        kakaoMarkerRef.current.setMap(kakaoMapRef.current)
-      }
-    }
-
+  /* ── 필지 조회 (클릭 시 호출) ───────────────────────────────────────────── */
+  const loadParcel = useCallback(async (lon: number, lat: number) => {
+    setLoading(true); setError(null)
     try {
       const data = await fetchParcelByCoord(lon, lat)
       setParcel(data)
       drawParcelPolygon(data, lon, lat)
     } catch {
-      setError('필지 정보를 조회할 수 없습니다. 다른 위치를 선택해보세요.')
-    } finally {
-      setLoading(false)
-    }
+      setError('필지 정보를 조회할 수 없습니다. 다른 위치를 클릭해보세요.')
+    } finally { setLoading(false) }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapEngine])
 
-  /* ── polygon 그리기 ─────────────────────────────────────────────────────── */
+  /* ── 선택된 필지 polygon 그리기 ─────────────────────────────────────────── */
   const drawParcelPolygon = (p: ParcelInfo, clickLon: number, clickLat: number) => {
     const coords = p.polygon_wgs84
     const hasPolygon = coords && coords.length >= 3
 
-    if (mapEngine === 'kakao' || kakaoMapRef.current) {
-      // 카카오
-      if (!kakaoMapRef.current || !window.kakao?.maps) return
+    // 카카오 모드
+    if (kakaoMapRef.current && window.kakao?.maps) {
       kakaoPolygonRef.current?.setMap(null)
       kakaoOverlayRef.current?.setMap(null)
 
@@ -455,18 +417,17 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         const path = coords!.map(([lng, lat]) => new window.kakao.maps.LatLng(lat, lng))
         const polygon = new window.kakao.maps.Polygon({
           path,
-          strokeWeight: 2.5, strokeColor: '#166534', strokeOpacity: 0.9,
-          fillColor: '#DCFCE7', fillOpacity: 0.0,
+          strokeWeight: 3, strokeColor: '#DC2626', strokeOpacity: 1.0,
+          fillColor: '#FEF2F2', fillOpacity: 0.25,
         })
         polygon.setMap(kakaoMapRef.current)
         kakaoPolygonRef.current = polygon
       }
-
       if (p.centroid) {
         const cl = new window.kakao.maps.LatLng(p.centroid.lat, p.centroid.lon)
         const overlay = new window.kakao.maps.CustomOverlay({
           position: cl,
-          content: `<div style="background:rgba(22,101,52,0.85);color:#fff;padding:3px 8px;border-radius:4px;font-size:11px;white-space:nowrap;">${p.jibun || '필지'}</div>`,
+          content: `<div style="background:rgba(220,38,38,0.9);color:#fff;padding:4px 10px;border-radius:4px;font-size:12px;font-weight:700;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.3);">✅ ${p.jibun || '선택된 필지'}</div>`,
           yAnchor: 1.5,
         })
         overlay.setMap(kakaoMapRef.current)
@@ -476,10 +437,10 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       return
     }
 
+    // Leaflet 모드
     if (leafletMapRef.current && window.L) {
-      // Leaflet 기존 레이어 제거
-      leafletLayersRef.current.forEach(l => l.remove())
-      leafletLayersRef.current = []
+      leafletParcelLayersRef.current.forEach(l => l.remove())
+      leafletParcelLayersRef.current = []
 
       const L = window.L
       const centerLat = p.centroid?.lat ?? clickLat
@@ -487,80 +448,70 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
 
       if (hasPolygon) {
         const lls = coords!.map(([lng, lat]) => [lat, lng] as [number, number])
-        const poly = L.polygon(lls, {
-          color: '#166534', weight: 2.5, opacity: 0.9,
-          fillColor: '#DCFCE7', fillOpacity: 0.0,
-        }).addTo(leafletMapRef.current)
-        leafletLayersRef.current.push(poly)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const poly = (L.polygon(lls, {
+          color: '#DC2626', weight: 3, opacity: 1.0,
+          fillColor: '#FEF2F2', fillOpacity: 0.3,
+        }) as any)
+        poly.addTo(leafletMapRef.current)
+        leafletParcelLayersRef.current.push(poly)
+
+        const bounds = poly.getBounds()
+        leafletMapRef.current.fitBounds(
+          [[bounds.getSouthWest().lat, bounds.getSouthWest().lng],
+           [bounds.getNorthEast().lat, bounds.getNorthEast().lng]],
+          { padding: [40, 40] } as object
+        )
       }
 
-      // 지번 표시 마커 (항상 표시)
       if (p.jibun && p.centroid) {
-        const centerLat2 = p.centroid.lat
-        const centerLon2 = p.centroid.lon
         const icon = (window.L as unknown as { divIcon: (o: object) => object }).divIcon({
-          html: `<div style="background:rgba(255,255,255,0.95);border:1.5px solid #166534;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700;color:#166534;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15);">${p.jibun}</div>`,
+          html: `<div style="
+            background:rgba(220,38,38,0.92);color:#fff;
+            padding:5px 12px;border-radius:6px;font-size:12px;font-weight:700;
+            white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.3);border:2px solid #fff;
+          ">✅ ${p.jibun}</div>`,
           className: '',
           iconAnchor: [0, 0],
         })
-        const jibunMarker = (window.L as unknown as { marker: (ll: [number,number], opts?: object) => LeafletLayer }).marker([centerLat2, centerLon2], { icon } as object)
+        const jibunMarker = (window.L as unknown as {
+          marker: (ll: [number,number], opts?: object) => LeafletLayer
+        }).marker([p.centroid.lat, p.centroid.lon], { icon } as object)
         jibunMarker.addTo(leafletMapRef.current)
-        leafletLayersRef.current.push(jibunMarker)
+        leafletParcelLayersRef.current.push(jibunMarker)
+      } else if (!hasPolygon) {
+        const marker = L.marker([centerLat, centerLon], {} as object).addTo(leafletMapRef.current)
+        leafletParcelLayersRef.current.push(marker)
+        leafletMapRef.current.panTo([centerLat, centerLon])
       }
-
-      // 마커
-      const marker = L.marker([centerLat, centerLon], {} as object).addTo(leafletMapRef.current)
-      leafletLayersRef.current.push(marker)
-      leafletMapRef.current.panTo([centerLat, centerLon])
     }
   }
 
-  /* ── 카카오 주소 검색 ──────────────────────────────────────────────────── */
-  const searchAddressKakao = (query: string) => {
-    if (!query.trim() || !window.kakao?.maps?.services) return
-    const geocoder = new window.kakao.maps.services.Geocoder()
-    geocoder.addressSearch(query, async (results, status) => {
-      if (status === window.kakao.maps.services.Status.OK && results[0]) {
-        const r = results[0]
-        const lon = parseFloat(r.x), lat = parseFloat(r.y)
-        kakaoMapRef.current?.setCenter(new window.kakao.maps.LatLng(lat, lon))
-        kakaoMapRef.current?.setLevel(4)
-        await loadParcel(lon, lat)
-      } else {
-        setError('주소를 찾을 수 없습니다.')
-      }
-    })
-  }
+  /* ── 지도 엔진 선택 ─────────────────────────────────────────────────────── */
+  useEffect(() => {
+    if (initDoneRef.current) return
+    initDoneRef.current = true
 
-  /* ── Leaflet 주소 검색 (Nominatim geocoder) ────────────────────────────── */
-  const searchAddressNominatim = async (query: string) => {
-    if (!query.trim()) return
-    setLoading(true)
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1&accept-language=ko`
-      )
-      const data = await res.json()
-      if (data[0]) {
-        const lat = parseFloat(data[0].lat), lon = parseFloat(data[0].lon)
-        leafletMapRef.current?.setView([lat, lon], 16)
-        await loadParcel(lon, lat)
-      } else {
-        setError('주소를 찾을 수 없습니다.')
+    const tryInit = () => {
+      if (!mapContainerRef.current) return false
+      if (window.__kakaoMapsError) { initLeafletMap(); return true }
+      if (window.__kakaoMapsReady && window.kakao?.maps?.Map) {
+        initKakaoMap(); return true
       }
-    } catch {
-      setError('주소 검색에 실패했습니다.')
-    } finally {
-      setLoading(false)
+      return false
     }
-  }
 
-  const handleSearch = () => {
-    if (mapEngine === 'kakao') searchAddressKakao(searchQuery)
-    else searchAddressNominatim(searchQuery)
-  }
+    if (tryInit()) return
+    let waited = 0
+    const timer = setInterval(() => {
+      waited += 100
+      if (tryInit()) { clearInterval(timer); return }
+      if (waited >= 6000) { clearInterval(timer); initLeafletMap() }
+    }, 100)
+    return () => clearInterval(timer)
+  }, [initKakaoMap, initLeafletMap])
 
-  /* ── Daum Postcode embed ───────────────────────────────────────────────── */
+  /* ── Daum Postcode embed ─────────────────────────────────────────────────── */
   useEffect(() => {
     if (!showAddrSearch || !addrEmbedRef.current || !window.daum) return
     const timer = setTimeout(() => {
@@ -571,7 +522,8 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
             const addr = data.jibunAddress || data.address
             setSearchQuery(addr)
             setShowAddrSearch(false)
-            handleSearch()
+            if (mapEngine === 'kakao') moveToAddressKakao(addr)
+            else moveToAddressNominatim(addr, false)
           },
           onclose: () => setShowAddrSearch(false),
           width: '100%', height: '100%',
@@ -579,35 +531,33 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       } catch { setShowAddrSearch(false) }
     }, 100)
     return () => clearTimeout(timer)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showAddrSearch])
 
-  /* ── 확인 ─────────────────────────────────────────────────────────────── */
+  /* ── 확인 ───────────────────────────────────────────────────────────────── */
   const handleConfirm = () => {
     if (!parcel) return
     onSelect(parcel, parcel.jibun || searchQuery || '')
   }
 
-  /* ── 렌더 ─────────────────────────────────────────────────────────────── */
-  const engineLabel = mapEngine === 'kakao'
-    ? '카카오 지도'
-    : mapEngine === 'leaflet'
-    ? 'OpenStreetMap (대안)'
-    : mapEngine === 'loading'
-    ? '지도 로딩 중...'
+  /* ── 렌더 ───────────────────────────────────────────────────────────────── */
+  const engineLabel = mapEngine === 'kakao' ? '카카오 지도'
+    : mapEngine === 'leaflet' ? 'OpenStreetMap'
+    : mapEngine === 'loading' ? '지도 로딩 중...'
     : '지도 로드 실패'
 
   return (
     <div className="map-modal-overlay" onClick={onClose}>
       <div className="map-modal" onClick={e => e.stopPropagation()}>
 
-        {/* 헤더 */}
+        {/* ── 헤더 ── */}
         <div className="map-modal-header">
           <div className="map-modal-title">
             <span>🗺️</span>
             <div>
               <div style={{ fontWeight: 700, fontSize: '15px' }}>지도에서 토지 선택</div>
               <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '1px' }}>
-                {engineLabel} · 지도 클릭 또는 주소 검색으로 필지 선택
+                {engineLabel} · VWorld 연속지적도 오버레이
               </div>
             </div>
           </div>
@@ -615,17 +565,31 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
         </div>
 
         <div className="map-modal-body">
-          {/* 검색바 */}
+
+          {/* ── 핵심 안내 배너 ── */}
+          <div style={{
+            background: 'linear-gradient(135deg, #1E40AF 0%, #1D4ED8 100%)',
+            borderRadius: 8, padding: '10px 14px', margin: '0 0 6px 0', color: '#fff',
+          }}>
+            <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 3 }}>📌 이용 방법</div>
+            <div style={{ fontSize: 11, lineHeight: 1.6, opacity: 0.92 }}>
+              1. 주소를 검색하면 <strong>지도 위치가 이동</strong>합니다 (필지 자동 선택 ✕)<br />
+              2. <strong>연속지적도 경계</strong>를 확인하면서 설치 대상 토지를 찾으세요<br />
+              3. 설치할 <strong>필지를 직접 클릭</strong>하면 그 polygon이 실제 대지 경계가 됩니다
+            </div>
+          </div>
+
+          {/* ── 검색바 ── */}
           <div className="map-search-bar">
             <input
               type="text"
               className="map-search-input"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="주소 또는 지번 입력 (예: 대전 유성구 방동 436)"
+              placeholder="주소 또는 지번 입력 → 검색하면 지도 위치만 이동"
               onKeyDown={e => e.key === 'Enter' && handleSearch()}
             />
-            <button className="map-search-btn" onClick={handleSearch}>검색</button>
+            <button className="map-search-btn" onClick={handleSearch}>지도 이동</button>
             {mapEngine === 'kakao' && (
               <button className="map-postcode-btn" onClick={() => setShowAddrSearch(v => !v)}>
                 📮 우편번호
@@ -633,118 +597,114 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
             )}
           </div>
 
-          {/* 지적도/지번 토글 버튼 (Leaflet 모드에서만 표시) */}
+          {/* ── Leaflet 레이어 컨트롤 ── */}
           {mapEngine === 'leaflet' && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, margin: '4px 0', flexWrap: 'wrap' }}>
 
-              {/* ── 위성사진 토글 ── */}
+              {/* 연속지적도 토글 */}
               <button
                 onClick={toggleCadastral}
+                title="연속지적도 (VWorld LP_PA_CBND_BUBUN)"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
                   padding: '5px 11px', borderRadius: 6, fontSize: '12px',
                   fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-                  border: cadastralOn ? '1.5px solid #1D4ED8' : '1.5px solid #CBD5E1',
-                  background: cadastralOn ? '#EFF6FF' : '#F8FAFC',
-                  color: cadastralOn ? '#1D4ED8' : '#64748B',
+                  border: cadastralOn ? '1.5px solid #166534' : '1.5px solid #CBD5E1',
+                  background: cadastralOn ? '#DCFCE7' : '#F8FAFC',
+                  color: cadastralOn ? '#166534' : '#64748B',
                 }}
               >
-                <span style={{ fontSize: 13 }}>🛰️</span>
-                {vworldReady ? '연속지적도' : '위성사진'}
+                <span style={{ fontSize: 13 }}>🗂️</span>
+                연속지적도
                 <span style={{
                   display: 'inline-block', width: 28, height: 15, borderRadius: 8,
-                  background: cadastralOn ? '#1D4ED8' : '#CBD5E1',
+                  background: cadastralOn ? '#166534' : '#CBD5E1',
                   position: 'relative', transition: 'background 0.2s', marginLeft: 2,
                 }}>
                   <span style={{
-                    position: 'absolute', top: 1.5,
-                    left: cadastralOn ? 15 : 2,
-                    width: 11, height: 11, borderRadius: '50%',
+                    position: 'absolute', top: 1.5, width: 11, height: 11, borderRadius: '50%',
                     background: '#fff', transition: 'left 0.2s',
+                    left: cadastralOn ? 15 : 2,
                   }} />
                 </span>
               </button>
 
-              {/* ── 지번 토글 (VWorld 활성 시에만 활성 스타일) ── */}
+              {/* 지번 토글 */}
               <button
                 onClick={toggleJibun}
-                title="지번 표시 (VWorld WMTS · 줌 14 이상에서 자동 표시)"
+                title="지번 표시 (줌 14 이상)"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 5,
                   padding: '5px 11px', borderRadius: 6, fontSize: '12px',
                   fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s',
-                  border: (jibunOn && vworldReady) ? '1.5px solid #92400E' : '1.5px solid #CBD5E1',
-                  background: (jibunOn && vworldReady) ? '#FEF3C7' : '#F8FAFC',
-                  color: (jibunOn && vworldReady) ? '#92400E' : '#64748B',
-                  opacity: vworldReady === null ? 0.5 : 1,
+                  border: jibunOn ? '1.5px solid #92400E' : '1.5px solid #CBD5E1',
+                  background: jibunOn ? '#FEF3C7' : '#F8FAFC',
+                  color: jibunOn ? '#92400E' : '#64748B',
+                  opacity: !vworldKey ? 0.5 : 1,
                 }}
               >
                 <span style={{ fontSize: 13 }}>🔢</span>
                 지번
                 <span style={{
                   display: 'inline-block', width: 28, height: 15, borderRadius: 8,
-                  background: (jibunOn && vworldReady) ? '#D97706' : '#CBD5E1',
+                  background: jibunOn ? '#D97706' : '#CBD5E1',
                   position: 'relative', transition: 'background 0.2s', marginLeft: 2,
                 }}>
                   <span style={{
-                    position: 'absolute', top: 1.5,
-                    left: jibunOn ? 15 : 2,
-                    width: 11, height: 11, borderRadius: '50%',
+                    position: 'absolute', top: 1.5, width: 11, height: 11, borderRadius: '50%',
                     background: '#fff', transition: 'left 0.2s',
+                    left: jibunOn ? 15 : 2,
                   }} />
                 </span>
               </button>
 
-              {/* 상태 텍스트 — VWorld 준비 전에는 숨김 */}
+              {/* VWorld 상태 */}
               {vworldReady === null && (
-                <span style={{ fontSize: '11px', color: '#94A3B8' }}>지적도 로딩 중…</span>
+                <span style={{ fontSize: '11px', color: '#94A3B8' }}>⏳ VWorld 연결 중…</span>
               )}
-              {vworldReady === false && cadastralOn && (
-                <span style={{ fontSize: '11px', color: '#1D4ED8' }}>🛰️ Esri 위성</span>
+              {vworldReady === true && (
+                <span style={{ fontSize: '11px', color: '#166534', fontWeight: 600 }}>
+                  ✅ VWorld 연속지적도 연결됨
+                </span>
               )}
-              {vworldReady === true && cadastralOn && (
-                <span style={{ fontSize: '11px', color: '#166534' }}>🗂️ VWorld 지적도</span>
-              )}
-              {vworldReady === true && jibunOn && (
-                <span style={{ fontSize: '11px', color: '#92400E' }}>· 지번 줌14+</span>
+              {vworldReady === false && (
+                <span style={{ fontSize: '11px', color: '#DC2626' }}>
+                  ⚠️ VWorld 미연결 (Esri 위성으로 대체)
+                </span>
               )}
             </div>
           )}
 
-          {/* 카카오 SDK 실패 안내 (닫기 가능) */}
-          {mapEngine === 'leaflet' && !dismissKakaoBanner && (
+          {/* ── OSM 폴백 배너 ── */}
+          {mapEngine === 'leaflet' && !dismissBanner && (
             <div style={{
               background: '#FFF8E1', border: '1px solid #FFD54F', borderRadius: 6,
-              padding: '6px 10px', fontSize: '11px', color: '#7B5700', margin: '2px 0',
+              padding: '5px 10px', fontSize: '11px', color: '#7B5700', margin: '2px 0',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
             }}>
-              <span>⚠️ 카카오 SDK 미연결 → OpenStreetMap 사용 중 (지도 클릭으로 필지 선택 가능)</span>
-              <button
-                onClick={() => setDismissKakaoBanner(true)}
-                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7B5700', fontSize: 14, padding: '0 2px', lineHeight: 1 }}
-              >✕</button>
+              <span>💡 카카오 지도 미연결 → OpenStreetMap + VWorld 연속지적도 오버레이 사용 중</span>
+              <button onClick={() => setDismissBanner(true)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7B5700', fontSize: 14 }}>✕</button>
             </div>
           )}
           {mapEngine === 'failed' && (
-            <div style={{
-              background: '#FEE2E2', border: '1px solid #F87171', borderRadius: 6,
-              padding: '8px 12px', fontSize: '12px', color: '#991B1B', margin: '4px 0',
-            }}>
-              ❌ 지도를 불러올 수 없습니다. 인터넷 연결을 확인해주세요.
+            <div style={{ background: '#FEE2E2', border: '1px solid #F87171', borderRadius: 6,
+              padding: '8px 12px', fontSize: '12px', color: '#991B1B', margin: '4px 0' }}>
+              ❌ 지도를 불러올 수 없습니다.
             </div>
           )}
 
-          {/* Daum 주소검색 embed */}
+          {/* Daum 주소검색 */}
           {showAddrSearch && (
             <div className="map-postcode-embed">
               {window.daum
                 ? <div ref={addrEmbedRef} style={{ width: '100%', height: '100%' }} />
-                : <div style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>주소검색 서비스 로딩 중...</div>
+                : <div style={{ padding: '20px', textAlign: 'center', color: '#94A3B8' }}>주소검색 로딩 중...</div>
               }
             </div>
           )}
 
-          {/* 지도 캔버스 */}
+          {/* ── 지도 캔버스 ── */}
           <div className="map-container-wrap">
             <div ref={mapContainerRef} className="map-canvas" />
 
@@ -756,27 +716,48 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
               </div>
             )}
 
-            {/* 사용 안내 */}
+            {/* 클릭 안내 */}
             {(mapEngine === 'kakao' || mapEngine === 'leaflet') && !parcel && !loading && (
               <div className="map-hint-overlay">
-                🖱️ 지도를 클릭하면 해당 위치의 필지를 선택합니다
+                🖱️ 설치할 토지의 필지 경계를 클릭하여 선택하세요
+              </div>
+            )}
+
+            {/* 선택 완료 표시 */}
+            {parcel && !loading && (
+              <div style={{
+                position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+                background: 'rgba(22,101,52,0.9)', color: '#fff',
+                padding: '5px 14px', borderRadius: 20, fontSize: '11px', fontWeight: 700,
+                pointerEvents: 'none', zIndex: 500, whiteSpace: 'nowrap',
+              }}>
+                ✅ 필지 선택됨 — 아래 정보 확인 후 "이 토지 선택" 클릭
               </div>
             )}
           </div>
 
-          {/* 오류 */}
-          {error && (
-            <div className="map-error-box">⚠️ {error}</div>
-          )}
+          {error && <div className="map-error-box">⚠️ {error}</div>}
 
-          {/* 선택된 필지 정보 */}
+          {/* ── 선택된 필지 정보 ── */}
           {parcel && (
             <div className="map-parcel-info">
               <div className="map-parcel-title">
                 <span>📍</span>
-                <span>선택된 토지</span>
-                {parcel.is_mock && <span className="map-mock-badge">샘플 데이터</span>}
+                <span>선택된 토지 (농막 설치 대상 필지)</span>
+                {parcel.is_mock && (
+                  <span className="map-mock-badge">⚠️ 샘플 데이터</span>
+                )}
               </div>
+              {parcel.is_mock && (
+                <div style={{
+                  background: '#FEF9C3', border: '1px solid #FDE047',
+                  borderRadius: 6, padding: '6px 10px', margin: '4px 0',
+                  fontSize: '11px', color: '#713F12', lineHeight: 1.5,
+                }}>
+                  ⚠️ VWorld API에서 실제 필지 데이터를 가져오지 못해 샘플 필지가 표시됩니다.<br />
+                  실제 서비스 환경(한국 IP)에서는 클릭한 위치의 정확한 필지 polygon이 반환됩니다.
+                </div>
+              )}
               <div className="map-parcel-grid">
                 <div className="map-parcel-item">
                   <span className="map-parcel-label">지번</span>
@@ -794,12 +775,28 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
                   <span className="map-parcel-label">용도지역</span>
                   <span className="map-parcel-value">{parcel.yongdo || '-'}</span>
                 </div>
+                {parcel.polygon_wgs84 && parcel.polygon_wgs84.length > 0 && (
+                  <div className="map-parcel-item" style={{ gridColumn: '1/-1' }}>
+                    <span className="map-parcel-label">경계</span>
+                    <span className="map-parcel-value" style={{ color: '#166534', fontWeight: 700 }}>
+                      ✅ Polygon {parcel.polygon_wgs84.length}개 좌표 — 실제 배치도 기준으로 사용
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div style={{
+                marginTop: 6, padding: '6px 10px',
+                background: '#F0FDF4', borderRadius: 6,
+                fontSize: '11px', color: '#166534', lineHeight: 1.5,
+              }}>
+                📌 <strong>선택한 필지의 경계가 실제 배치도 생성 기준이 됩니다.</strong><br />
+                농막과 정화조는 이 polygon 내부에 자동 배치됩니다.
               </div>
             </div>
           )}
         </div>
 
-        {/* 푸터 */}
+        {/* ── 푸터 ── */}
         <div className="map-modal-footer">
           <button className="map-btn-cancel" onClick={onClose}>취소</button>
           <button
@@ -807,7 +804,7 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
             onClick={handleConfirm}
             disabled={!parcel}
           >
-            {parcel ? '✅ 이 토지 선택' : '토지를 선택해주세요'}
+            {parcel ? '✅ 이 토지 선택 (배치도 기준으로 사용)' : '필지를 클릭하여 선택해주세요'}
           </button>
         </div>
       </div>

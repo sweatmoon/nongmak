@@ -66,13 +66,24 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
   const cadastralLayerRef = useRef<any>(null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const baseLayerRef = useRef<any>(null)
+  // vworldKey ref: 클로저 캡처 문제 방지
+  const vworldKeyRef = useRef<string>('')
 
   // VWorld API 키 로드
   useEffect(() => {
     fetch('/api/vworld-key')
       .then(r => r.json())
-      .then(d => setVworldKey(d.key || ''))
+      .then(d => {
+        const key = d.key || ''
+        vworldKeyRef.current = key
+        setVworldKey(key)
+        // 지도가 이미 준비됐으면 즉시 연속지적도 추가
+        if (key && leafletMapRef.current && getL() && !cadastralLayerRef.current) {
+          _addCadastralLayerNow(key)
+        }
+      })
       .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   /* ── Leaflet 로드 + 지도 초기화 ────────────────────────────────────────── */
@@ -230,7 +241,30 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
     setReady(true)
 
     // 지도 크기 재계산 (모달 안에 렌더될 때 필요)
-    setTimeout(() => { map.invalidateSize() }, 300)
+    setTimeout(() => {
+      map.invalidateSize()
+      // VWorld 키가 이미 로드됐으면 연속지적도 자동 ON
+      const key = vworldKeyRef.current
+      if (key && !cadastralLayerRef.current) {
+        _addCadastralLayerNow(key)
+      }
+    }, 300)
+  }
+
+  /* ── 연속지적도 레이어 추가 (ref 기반) ──────────────────────────────────── */
+  function _addCadastralLayerNow(key: string) {
+    const map = leafletMapRef.current
+    const L = getL()
+    if (!map || !L || cadastralLayerRef.current) return
+    const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+    const layer = L.tileLayer(tileUrl, {
+      attribution: '© VWorld 연속지적도',
+      maxZoom: 19, minZoom: 7,
+      tileSize: 256, opacity: 1.0, zIndex: 400,
+    })
+    layer.addTo(map)
+    cadastralLayerRef.current = layer
+    setCadastralOn(true)
   }
 
   /* ── 아이콘 HTML 빌더 ─────────────────────────────────────────────────── */
@@ -318,7 +352,7 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
   }, [parcel])
 
 
-  /* ── VWorld 지적도 타일 토글 (OSM 위에 오버레이) ─────────────────────────── */
+  /* ── VWorld 지적도 타일 토글 ────────────────────────────────────────────── */
   const toggleCadastral = useCallback(() => {
     if (!leafletMapRef.current || !getL()) return
     if (cadastralLayerRef.current) {
@@ -326,23 +360,19 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
       cadastralLayerRef.current = null
       setCadastralOn(false)
     } else {
-      // 브라우저 직접 VWorld WMTS URL 사용 (키 있으면 지적도, 없으면 Esri 위성)
-      const tileUrl = vworldKey
-        ? `https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const key = vworldKeyRef.current  // ref에서 직접 읽기
+      const tileUrl = key
+        ? `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
         : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-      const layer = getL().tileLayer(
-        tileUrl,
-        {
-          attribution: vworldKey ? '© VWorld 연속지적도' : '© Esri 위성사진',
-          maxZoom: 19, minZoom: 7,
-          tileSize: 256, opacity: 1.0, zIndex: 400,
-        }
-      )
+      const layer = getL().tileLayer(tileUrl, {
+        attribution: key ? '© VWorld 연속지적도' : '© Esri 위성사진',
+        maxZoom: 19, minZoom: 7, tileSize: 256, opacity: 1.0, zIndex: 400,
+      })
       layer.addTo(leafletMapRef.current)
       cadastralLayerRef.current = layer
       setCadastralOn(true)
     }
-  }, [vworldKey])
+  }, [])
 
   /* ── 위성사진 토글 ───────────────────────────────────────────────────── */
   const toggleSatellite = useCallback(() => {
