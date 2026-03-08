@@ -164,7 +164,8 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
 
   /* ── VWorld API 키 로드 ─────────────────────────────────────────────────── */
   useEffect(() => {
-    fetch('/api/vworld-key')
+    const apiBase = import.meta.env.VITE_API_BASE || '/api'
+    fetch(`${apiBase}/vworld-key`)
       .then(r => r.json())
       .then(d => {
         const key = d.key || ''
