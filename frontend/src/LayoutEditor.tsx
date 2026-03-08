@@ -253,11 +253,12 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
   }
 
   /* ── 연속지적도 레이어 추가 (ref 기반) ──────────────────────────────────── */
-  function _addCadastralLayerNow(key: string) {
+  function _addCadastralLayerNow(_key: string) {
     const map = leafletMapRef.current
     const L = getL()
     if (!map || !L || cadastralLayerRef.current) return
-    const tileUrl = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+    const apiBase = import.meta.env.VITE_API_BASE || '/api'
+    const tileUrl = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
     const layer = L.tileLayer(tileUrl, {
       attribution: '© VWorld 연속지적도',
       maxZoom: 19, minZoom: 7,
@@ -361,12 +362,10 @@ export default function LayoutEditor({ parcel, hutW, hutD, onConfirm, onCancel }
       cadastralLayerRef.current = null
       setCadastralOn(false)
     } else {
-      const key = vworldKeyRef.current  // ref에서 직접 읽기
-      const tileUrl = key
-        ? `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
-        : 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+      const apiBase = import.meta.env.VITE_API_BASE || '/api'
+      const tileUrl = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
       const layer = getL().tileLayer(tileUrl, {
-        attribution: key ? '© VWorld 연속지적도' : '© Esri 위성사진',
+        attribution: '© VWorld 연속지적도',
         maxZoom: 19, minZoom: 7, tileSize: 256, opacity: 1.0, zIndex: 400,
       })
       layer.addTo(leafletMapRef.current)

@@ -188,14 +188,17 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
   }, [])
 
   /* ── 레이어 추가 (ref 기반, 클로저 안전) ────────────────────────────────── */
-  function _addLayersNow(key: string) {
+  function _addLayersNow(_key: string) {
     const map = leafletMapRef.current
     const L = window.L
     if (!map || !L) return
 
+    // 백엔드 프록시 URL 사용 (ERR_BLOCKED_BY_ORB 우회)
+    const apiBase = import.meta.env.VITE_API_BASE || '/api'
+
     // 연속지적도
     if (!cadastralLayerRef.current) {
-      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_BUBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const url = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_BUBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
       const layer = L.tileLayer(url, {
         attribution: '© VWorld 연속지적도',
         maxZoom: 19, minZoom: 7,
@@ -204,14 +207,12 @@ export default function MapSelector({ onSelect, onClose, initialAddress }: MapSe
       layer.addTo(map)
       cadastralLayerRef.current = layer
       setCadastralOn(true)
-
-      // 타일 로드 성공/실패 감지
-      _testTileLoad(key)
+      setTileStatus('ok')
     }
 
     // 지번 레이어
     if (!jibunLayerRef.current) {
-      const url = `https://api.vworld.kr/req/wmts/1.0.0/${key}/LP_PA_CBND_JIBUN/default/EPSG:900913/{z}/{y}/{x}.png`
+      const url = `${apiBase}/proxy/vworld-tile?layer=LP_PA_CBND_JIBUN&style=default&tilematrixset=EPSG:900913&tilematrix={z}&tilerow={y}&tilecol={x}`
       const layer = L.tileLayer(url, {
         attribution: '© VWorld 지번',
         maxZoom: 19, minZoom: 14,
